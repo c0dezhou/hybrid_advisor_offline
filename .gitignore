@@ -1,0 +1,73 @@
+# 通用版
+# ── Python 基础
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# C 扩展/编译产物
+*.so
+*.dylib
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 测试/工具缓存
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+.env/
+
+# 日志
+*.log
+logs/
+*.out
+*.err
+
+# ── 训练/实验产物
+runs/           # tensorboard 默认
+wandb/
+mlruns/         # MLflow
+tensorboard/
+tb_logs/
+checkpoints/
+models/
+artifacts/
+outputs/
+d3rlpy_logs/
+# 数据集（建议不入库）
+data/
+datasets/
+!data/README.md
+!datasets/README.md
+
+# 模型/大文件（如不想入库；想入库请用 Git LFS）
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+*.h5
+
+# IDE/编辑器
+.vscode/
+.idea/
+*.code-workspace
+
+# OS 杂项
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 覆盖率
+.coverage
+htmlcov/
+coverage.xml
