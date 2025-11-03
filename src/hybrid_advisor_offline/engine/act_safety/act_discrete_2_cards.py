@@ -1,4 +1,5 @@
 import os
+import sys
 import math
 from dataclasses import dataclass, field
 from typing import List
@@ -75,9 +76,13 @@ _DEFAULT_CARDS: List[ActCard] = [
     ),
 ]
 
+if os.getenv("USE_CARD_FACTORY", "0") == "1":
+    from hybrid_advisor_offline.engine.act_safety.act_cards_factory import build_card_factory
+    ALL_CARDS: List[ActCard] = build_card_factory()
+else:
+    ALL_CARDS = _DEFAULT_CARDS
 
 # 快速查找辅助函数，O(1) 时间复杂度
-ALL_CARDS = _DEFAULT_CARDS
 # act_id当键，card本身当值
 _CARD_BY_ID_MAP = {card.act_id: card for card in ALL_CARDS}
 _ACT_SPACE_SIZE = len(ALL_CARDS)
@@ -96,14 +101,14 @@ def get_act_space_size():
     """
     return _ACT_SPACE_SIZE
 
-# # 示例：如何访问和使用动作卡片
-# if __name__ == '__main__':
-#     print(f"定义的动作卡片总数: {get_act_space_size()}")
+# 示例：如何访问和使用动作卡片
+if __name__ == '__main__':
+    print(f"定义的动作卡片总数: {get_act_space_size()}")
     
-#     # 获取一个特定的卡片
-#     card = get_card_by_id(2)
-#     print("\n卡片示例:")
-#     print(f"  ID: {card.card_id}")
-#     print(f"  风险等级: {card.risk_level}")
-#     print(f"  目标配置 (股票, 债券, 现金): {card.target_alloc}")
-#     print(f"  描述: {card.description}")
+    # 获取一个特定的卡片
+    card = get_card_by_id(2)
+    print("\n卡片示例:")
+    print(f"  ID: {card.card_id}")
+    print(f"  风险等级: {card.risk_level}")
+    print(f"  目标配置 (股票, 债券, 现金): {card.target_alloc}")
+    print(f"  描述: {card.description}")
