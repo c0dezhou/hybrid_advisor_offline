@@ -33,9 +33,8 @@ logs/
 *.err
 
 # ── 训练/实验产物
-runs/           # tensorboard 默认
+runs/      
 wandb/
-mlruns/         # MLflow
 tensorboard/
 tb_logs/
 checkpoints/
@@ -44,6 +43,7 @@ artifacts/
 outputs/
 d3rlpy_logs/
 # 数据集（建议不入库）
+src/hybrid_advisor_offline/data
 data/
 datasets/
 !data/README.md
@@ -56,6 +56,7 @@ datasets/
 *.onnx
 *.tflite
 *.h5
+*.jsonl
 
 # IDE/编辑器
 .vscode/
