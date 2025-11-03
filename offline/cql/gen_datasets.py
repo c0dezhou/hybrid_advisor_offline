@@ -114,7 +114,7 @@ def download_user_data():
     return b_m_full_df
 
 def main():
-    "构造数据集"
+    """构造数据集"""
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
         print(f"创建文件夹: {DATA_DIR}")
