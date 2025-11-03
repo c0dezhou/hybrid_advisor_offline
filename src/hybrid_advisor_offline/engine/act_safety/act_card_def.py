@@ -10,6 +10,7 @@ class ActCard:
     """
     act_id: int # 动作的唯一的整数ID，供RL算法内部使用
     card_id: str # 人类可读的唯一卡片ID，如 "CON_CASH_HEAVY"。
+    disclosure_key: str # 合规披露的key
     risk_level: int  # 风险等级（可根据业务需要修改，先暂时这么设置）0: 保守型, 1: 稳健型, 2: 进取型
     target_alloc: List[float] = field(repr=False) # 目标资产配置 [股票, 债券, 现金]
     description: str # 面向客户或理财经理的合规描述

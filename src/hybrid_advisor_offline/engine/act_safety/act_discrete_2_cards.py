@@ -6,11 +6,14 @@ from .act_card_def import ActCard
 
 # _DEFAULT_CARDS 这个变量是一个列表 (List)，
 # 并且这个列表里面的每一个元素都应该是 ActCard 类的实例
+# disclosure_key用于对外披露，客户使用
+# description用于内部审计时候使用，是该策略的简明概括
 _DEFAULT_CARDS: List[ActCard] = [
     # --- 风险等级 0: 保守型 ---
     ActCard(
         act_id=0,
         card_id="CON_CASH_HEAVY",
+        disclosure_key="CONSERVATIVE_STABILITY",
         risk_level=0,
         target_alloc=[0.10, 0.20, 0.70],  # 目标配置: [股票, 债券, 现金]
         description="优先考虑保本金，在当前市场环境下持有较高比例现金。",
@@ -18,6 +21,7 @@ _DEFAULT_CARDS: List[ActCard] = [
     ActCard(
         act_id=1,
         card_id="CON_BOND_TILT",
+        disclosure_key="CONSERVATIVE_INCOME",
         risk_level=0,
         target_alloc=[0.20, 0.40, 0.40],
         description="在保本基础上，适度增持一定数量的债券以寻求稳定收益。",
@@ -27,6 +31,7 @@ _DEFAULT_CARDS: List[ActCard] = [
     ActCard(
         act_id=2,
         card_id="MOD_BALANCED",
+        disclosure_key="MODERATE_BALANCED",
         risk_level=1,
         target_alloc=[0.40, 0.40, 0.20],
         description="维持股债均衡配置，以平衡市场波动与长期增长机会。",
@@ -34,6 +39,7 @@ _DEFAULT_CARDS: List[ActCard] = [
     ActCard(
         act_id=3,
         card_id="MOD_GROWTH_TILT",
+        disclosure_key="MODERATE_GROWTH",
         risk_level=1,
         target_alloc=[0.50, 0.40, 0.10],
         description="在均衡基础上，略微提高风险资产比重，以提高收益。",
@@ -43,6 +49,7 @@ _DEFAULT_CARDS: List[ActCard] = [
     ActCard(
         act_id=4,
         card_id="AGG_EQUITY_FOCUS",
+        disclosure_key="AGGRESSIVE_GROWTH",
         risk_level=2,
         target_alloc=[0.70, 0.20, 0.10],
         description="侧重于风险机会，旨在最大化长期资本增值潜力。",
@@ -50,6 +57,7 @@ _DEFAULT_CARDS: List[ActCard] = [
     ActCard(
         act_id=5,
         card_id="AGG_FULL_EQUITY",
+        disclosure_key="AGGRESSIVE_MAX_GROWTH",
         risk_level=2,
         target_alloc=[0.80, 0.10, 0.10],
         description="进一步提高风险配置，以充分参与市场长期增长趋势。",
