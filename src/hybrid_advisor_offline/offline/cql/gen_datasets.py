@@ -11,7 +11,7 @@ from ucimlrepo import fetch_ucirepo
 DATA_DIR = "./data"
 # SPY：标普 500 指数 ETF
 # AGG：美国综合债券 ETF
-# SHY：短期国债 ETF
+# SHY：短期国债 ETF 使用SHY作为现金的模拟。原因：1.模拟无风险利率，2.可交易性 3.真实市场数据驱动
 _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
 
 def _fetch_data_from_yf(ticker, maxretry, base_sleep_second):
@@ -66,7 +66,7 @@ def _gen_synthetic_series(ticker):
     return pd.Series(price_series, index=date_idx, name=ticker)
 
 # 多层 fallback
-def download_market_data(maxretry: int = 5, base_sleep_sec: int = 60):
+def download_mkt_data(maxretry: int = 5, base_sleep_sec: int = 60):
     """
     下载 SPY、AGG 和 SHY 过去 10 年的每日价格数据，并将数据保存为 CSV 文件
     首选yf, 速率限制就用stooq, 不行就用合成数据
@@ -91,11 +91,11 @@ def download_market_data(maxretry: int = 5, base_sleep_sec: int = 60):
             print(f"    {ticker} 从 {source} 下载成功, {len(series)} 行.")
             series_list.append(series)
 
-        market_df = pd.concat(series_list, axis=1).sort_index()
-        output_path = os.path.join(DATA_DIR, "market_data.csv")
-        market_df.to_csv(output_path)
+        mkt_df = pd.concat(series_list, axis=1).sort_index()
+        output_path = os.path.join(DATA_DIR, "mkt_data.csv")
+        mkt_df.to_csv(output_path)
         print(f"市场数据保存在 {output_path}")
-        return market_df
+        return mkt_df
 
 def download_user_data():
     """
@@ -118,7 +118,7 @@ def main():
     if not os.path.exists(DATA_DIR):
         os.makedirs(DATA_DIR)
         print(f"创建文件夹: {DATA_DIR}")
-    download_market_data()
+    download_mkt_data()
     print("+"*30)
     download_user_data()
     print("\n数据集构造完毕")

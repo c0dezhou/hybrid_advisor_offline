@@ -133,7 +133,7 @@ def make_up_to_vec(up: UserProfile):
     return _user_model_preprocessor.transform(user_df).toarray().flatten().astype(np.float32)
 
 def build_state_vec(
-    market_features: MarketSnapshot,
+    mkt_features: MarketSnapshot,
     user_profile: UserProfile,
     current_alloc: np.ndarray,
     user_vector: Optional[np.ndarray] = None
@@ -148,12 +148,12 @@ def build_state_vec(
 
     """
     # 拼接市场特征
-    market_vec = np.concatenate([
-        market_features.rolling_30d_returen,
-        market_features.rolling_30d_vol,
-        np.array([market_features.vix])
+    mkt_vec = np.concatenate([
+        mkt_features.rolling_30d_returen,
+        mkt_features.rolling_30d_vol,
+        np.array([mkt_features.vix])
     ]).astype(np.float32, copy=False)
-    # print(f"DEBUG: market_vec shape={market_vec.shape}")
+    # print(f"DEBUG: mkt_vec shape={mkt_vec.shape}")
 
     # 处理用户特征
     if user_vector is None:
@@ -168,7 +168,7 @@ def build_state_vec(
 
     # 拼接前三项
     state_vector = np.concatenate([
-        market_vec,
+        mkt_vec,
         user_vec,
         alloc_vec
     ])
@@ -192,7 +192,7 @@ def get_state_dim() -> int:
         )
 
     # 创建虚拟对象以推断维度
-    dummy_market = MarketSnapshot(
+    dummy_mkt = MarketSnapshot(
         rolling_return_30d=np.zeros(3),
         rolling_vol_30d=np.zeros(3),
         vix_level=0.0
@@ -204,7 +204,7 @@ def get_state_dim() -> int:
     dummy_alloc = np.array([0.6, 0.3, 0.1])
 
     # 构建一个样本状态向量以获取其大小
-    dummy_state = build_state_vec(dummy_market, dummy_user, dummy_alloc)
+    dummy_state = build_state_vec(dummy_mkt, dummy_user, dummy_alloc)
     _state_dim = len(dummy_state)
     
     return _state_dim
@@ -216,7 +216,7 @@ if __name__ == '__main__':
         print(f"动态确定的状态维度: {state_dimension}")
 
         # 创建样本输入
-        market = MarketSnapshot(
+        mkt = MarketSnapshot(
             rolling_return_30d=np.array([0.05, 0.01, 0.001]),
             rolling_vol_30d=np.array([0.15, 0.05, 0.02]),
             vix_level=0.18
@@ -225,7 +225,7 @@ if __name__ == '__main__':
         alloc = np.array([0.7, 0.2, 0.1])
 
         # 构建状态向量
-        state_vec = build_state_vec(market, user, alloc)
+        state_vec = build_state_vec(mkt, user, alloc)
         
         print(f"\n为风险等级为 {user.risk_bucket} (进取型) 的用户生成的状态向量:")
         print(f"  形状: {state_vec.shape}")
