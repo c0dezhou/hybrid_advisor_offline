@@ -87,10 +87,3 @@ def tarin_usr_accetp_model():
     joblib.dump(model_pipline,MODEL_PATH)
     # 模型预测的准确性严重依赖于新数据的预处理方式必须和训练数据完全一致
     print(f"\n模型 Pipeline 已保存至: {MODEL_PATH}")
-
-def main():
-    tarin_usr_accetp_model()
-    print("\n用户接受度模型训练过程完成。")
-
-if __name__ == "__main__":
-    main()

@@ -1,7 +1,7 @@
 import datetime
 from typing import Dict
 
-from .act_card_def import ActCard
+from ..act_safety.act_card_def import ActCard
 
 # --- 这里应该设置经合规部门批准的解释模板 ---
 # 这是一个字典，存储了所有面向客户的、预先批准的解释文本。
@@ -50,27 +50,3 @@ def build_explain_pack(card: ActCard, user_risk_bucket: int, model_version: str 
         "audit_text": audit_summary,
     }
 
-if __name__ == '__main__':
-    from .act_discrete_2_cards import get_card_by_id
-
-    print("--- 测试解释包生成器 ---")
-
-    # 示例 1: 一个稳健型用户得到了一个均衡型卡片
-    moderate_user_bucket = 1
-    balanced_card = get_card_by_id(2) # MOD_BALANCED
-    
-    pack1 = build_explain_pack(balanced_card, moderate_user_bucket)
-    
-    print(f"\n场景 1: 稳健型用户, 均衡型卡片 ({balanced_card.card_id})")
-    print(f"  客户文本: {pack1['customer_friendly_text']}")
-    print(f"  审计文本: {pack1['audit_text']}")
-
-    # 示例 2: 一个进取型用户得到了一个增长型卡片
-    aggressive_user_bucket = 2
-    growth_card = get_card_by_id(4) # AGG_EQUITY_FOCUS
-
-    pack2 = build_explain_pack(growth_card, aggressive_user_bucket, model_version="cql_v1.1-beta")
-
-    print(f"\n场景 2: 进取型用户, 增长型卡片 ({growth_card.card_id})")
-    print(f"  客户文本: {pack2['customer_friendly_text']}")
-    print(f"  审计文本: {pack2['audit_text']}")

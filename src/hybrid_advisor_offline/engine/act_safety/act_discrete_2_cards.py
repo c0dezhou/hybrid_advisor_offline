@@ -88,15 +88,3 @@ def get_act_space_size():
     返回已定义的离散动作的总数。
     """
     return _ACT_SPACE_SIZE
-
-# 示例：如何访问和使用动作卡片
-if __name__ == '__main__':
-    print(f"定义的动作卡片总数: {get_act_space_size()}")
-    
-    # 获取一个特定的卡片
-    card = get_card_by_id(2)
-    print("\n卡片示例:")
-    print(f"  ID: {card.card_id}")
-    print(f"  风险等级: {card.risk_level}")
-    print(f"  目标配置 (股票, 债券, 现金): {card.target_alloc}")
-    print(f"  描述: {card.description}")

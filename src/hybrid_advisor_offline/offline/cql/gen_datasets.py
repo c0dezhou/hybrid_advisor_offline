@@ -113,15 +113,3 @@ def download_user_data():
     print(f"用户数据保存在 {output_path}")
     return b_m_full_df
 
-def main():
-    """构造数据集"""
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR)
-        print(f"创建文件夹: {DATA_DIR}")
-    download_mkt_data()
-    print("+"*30)
-    download_user_data()
-    print("\n数据集构造完毕")
-
-if __name__ == "__main__":
-    main()

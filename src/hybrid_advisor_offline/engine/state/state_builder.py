@@ -193,9 +193,9 @@ def get_state_dim() -> int:
 
     # 创建虚拟对象以推断维度
     dummy_mkt = MarketSnapshot(
-        rolling_return_30d=np.zeros(3),
-        rolling_vol_30d=np.zeros(3),
-        vix_level=0.0
+        rolling_30d_returen=np.zeros(3),
+        rolling_30d_vol=np.zeros(3),
+        vix=0.0
     )
     dummy_user = UserProfile(
         age=40, job='management', marital='married', education='tertiary',
@@ -208,29 +208,3 @@ def get_state_dim() -> int:
     _state_dim = len(dummy_state)
     
     return _state_dim
-
-if __name__ == '__main__':
-    if _user_model_pipeline:
-        print("--- 测试状态构建器 ---")
-        state_dimension = get_state_dim()
-        print(f"动态确定的状态维度: {state_dimension}")
-
-        # 创建样本输入
-        mkt = MarketSnapshot(
-            rolling_return_30d=np.array([0.05, 0.01, 0.001]),
-            rolling_vol_30d=np.array([0.15, 0.05, 0.02]),
-            vix_level=0.18
-        )
-        user = UserProfile(age=30, job='technician', marital='single', education='secondary', default='no', balance=2000, housing='yes', loan='no')
-        alloc = np.array([0.7, 0.2, 0.1])
-
-        # 构建状态向量
-        state_vec = build_state_vec(mkt, user, alloc)
-        
-        print(f"\n为风险等级为 {user.risk_bucket} (进取型) 的用户生成的状态向量:")
-        print(f"  形状: {state_vec.shape}")
-        print(f"  数据类型: {state_vec.dtype}")
-        print(f"  前10个样本值: {state_vec[:10]}")
-    else:
-        print("无法运行测试，因为用户模型尚未训练。请运行:")
-        print("python advisor_hybrid_rl/data_pipeline/train_user_model.py")
