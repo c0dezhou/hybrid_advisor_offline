@@ -8,11 +8,41 @@ import requests
 import yfinance as yf
 from ucimlrepo import fetch_ucirepo
 
+import sys
+from tqdm import tqdm
+from d3rlpy.dataset import MDPDataset
+from d3rlpy.constants import ActionSpace
+
+from hybrid_advisor_offline.engine.envs.market_envs import MarketEnv
+from hybrid_advisor_offline.engine.state.state_builder import (
+    UserProfile,
+    build_state_vec,
+    get_state_dim,
+    user_row_to_profile,
+    make_up_to_vec,
+)
+from hybrid_advisor_offline.engine.rewards.reward_architect import compute_reward
+from hybrid_advisor_offline.engine.act_safety.act_filter import allowed_cards_for_user
+from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
+from hybrid_advisor_offline.engine.policy.policy_based_rule import policy_based_rule
+
+# # 兼容直接以脚本方式运行：把项目根目录加入 sys.path，保证绝对导入可用。
+# CURRENT_DIR = os.path.dirname(__file__)
+# PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
+# if PROJECT_ROOT not in sys.path:
+#     sys.path.insert(0, PROJECT_ROOT)
+
+
 DATA_DIR = "./data"
 # SPY：标普 500 指数 ETF
 # AGG：美国综合债券 ETF
 # SHY：短期国债 ETF 使用SHY作为现金的模拟。原因：1.模拟无风险利率，2.可交易性 3.真实市场数据驱动
 _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
+
+# --- 常量定义 ---
+USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
+OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
+N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
 
 def _fetch_data_from_yf(ticker, maxretry, base_sleep_second):
     for attempt in range(1, maxretry + 1):
@@ -75,12 +105,12 @@ def download_mkt_data(maxretry: int = 5, base_sleep_sec: int = 60):
     series_list = []
 
     for ticker in ["SPY", "AGG", "SHY"]:
-        print(f"正在下载{ticker}...")
-        try:
-            series = _fetch_data_from_yf(ticker, maxretry, base_sleep_sec)
-            source = "yf"
-        except RuntimeError as e:
-            print(f"yf不可下载{ticker}：{e},尝试stooq...")
+            print(f"正在下载{ticker}...")
+        # try:
+        #     series = _fetch_data_from_yf(ticker, maxretry, base_sleep_sec)
+        #     source = "yf"
+        # except RuntimeError as e:
+        #     print(f"yf不可下载{ticker}：{e},尝试stooq...")
             try:
                 series = _fetch_data_from_stooq(ticker)
                 source = "stooq"
@@ -88,14 +118,14 @@ def download_mkt_data(maxretry: int = 5, base_sleep_sec: int = 60):
                 print(f"stooq不可下载{ticker}：{s_e},尝试合成数据...")
                 series = _gen_synthetic_series(ticker)
                 source = "synthetic"
-            print(f"    {ticker} 从 {source} 下载成功, {len(series)} 行.")
+            print(f"    {ticker} 使用 {source} 数据，共 {len(series)} 行.")
             series_list.append(series)
 
-        mkt_df = pd.concat(series_list, axis=1).sort_index()
-        output_path = os.path.join(DATA_DIR, "mkt_data.csv")
-        mkt_df.to_csv(output_path)
-        print(f"市场数据保存在 {output_path}")
-        return mkt_df
+    mkt_df = pd.concat(series_list, axis=1).sort_index()
+    output_path = os.path.join(DATA_DIR, "mkt_data.csv")
+    mkt_df.to_csv(output_path)
+    print(f"市场数据保存在 {output_path}")
+    return mkt_df
 
 def download_user_data():
     """
@@ -113,3 +143,102 @@ def download_user_data():
     print(f"用户数据保存在 {output_path}")
     return b_m_full_df
 
+
+
+def generate_offline_dataset():
+    """
+    通过在市场环境中为多个用户模拟一个基于规则的策略，来生成一个离线强化学习数据集。
+    这个数据集将用于训练 CQL 算法。
+    """
+    print("-----开始生成离线数据集-------")
+
+    # 1. 加载用户数据以供采样
+    if not os.path.exists(USER_DATA_FILE):
+        raise FileNotFoundError(f"用户数据未找到于 {USER_DATA_FILE}。请先运行下载脚本。")
+    user_df = pd.read_csv(USER_DATA_FILE, sep=';')
+    # 清理列名
+    user_df.columns = [col.strip().replace('"', '') for col in user_df.columns]
+    
+    # 为模拟采样用户
+    if len(user_df) < N_USERS_TO_SIMULATE:
+        print(f"警告: 请求模拟 {N_USERS_TO_SIMULATE} 个用户, 但只有 {len(user_df)} 个可用。将使用所有用户。")
+        sampled_users_df = user_df
+    else:
+        sampled_users_df = user_df.sample(n=N_USERS_TO_SIMULATE, random_state=42) # 随机抽取用户
+
+    # 2. 初始化环境并获取状态维度
+    try:
+        env = MarketEnv()
+        obs_dim = get_state_dim()
+        print(f"obs维度: {obs_dim}")
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"初始化环境时出错: {e}")
+        print("请确保您已成功download 市场数据，用户数据 和 train_user_model。")
+        return
+
+    # 3. 准备列表以存储所有转换
+    obss, acts, rwds, dones = [], [], [], []
+
+    print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
+    for _, user_row in tqdm(sampled_users_df.iterrows(), total=len(sampled_users_df)):
+        # 为当前用户创建一个经过清理的 UserProfile 对象
+        user_profile = user_row_to_profile(user_row)
+        user_vector = make_up_to_vec(user_profile)
+        
+        # 为每个新用户重置环境
+        info = env.reset()
+        
+        done = False
+        while not done:
+            # a. 构建当前状态
+            state_vec = build_state_vec(
+                mkt_features=info['mkt_sshot'],
+                user_profile=user_profile,
+                curr_alloc=info['curr_alloc'],
+                user_vector=user_vector
+            )
+
+            # b. 获取允许的动作，并使用基于规则的策略选择一个
+            allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
+            action_id, _ = policy_based_rule(state_vec, allowed_cards, user_profile.risk_bucket)
+
+            # c. 步进环境
+            market_return, done, next_info = env.step(action_id)
+
+            # d. 计算奖励
+            # 为简单起见，在数据集生成阶段我们将忽略回撤
+            reward = compute_reward(market_return, user_profile, drawdown=0.0)
+
+            # e. 存储转换
+            obss.append(state_vec)
+            acts.append(action_id)
+            rwds.append(reward)
+            dones.append(done)
+
+            # 更新循环所使用的环境信息
+            info = next_info
+
+    print(f"\n总共生成了 {len(obss)} 个转换。")
+
+    # 4. 创建并保存 d3rlpy MDPDataset
+    obss_array = np.asarray(obss, dtype=np.float32)
+    acts_array = np.asarray(acts, dtype=np.int64)
+    rwds_array = np.asarray(rwds, dtype=np.float32)
+    dones_array = np.asarray(dones, dtype=np.float32)
+
+    dataset = MDPDataset(
+        observations=obss_array,
+        actions=acts_array,
+        rewards=rwds_array,
+        terminals=dones_array,
+        action_space=ActionSpace.DISCRETE,
+        action_size=get_act_space_size(),
+    )
+    
+    dataset.dump(OUTPUT_DATASET_PATH)
+    print(f"离线数据集已保存至 {OUTPUT_DATASET_PATH}")
+
+if __name__ == "__main__":
+    # download_mkt_data()
+    generate_offline_dataset()
+    print("\n离线数据集生成过程完成。")

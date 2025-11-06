@@ -5,7 +5,7 @@ from .act_card_def import ActCard
 from .act_discrete_2_cards import ALL_CARDS
 
 # 注意：user_risk_bucket代表用户的风险等级（用户属性），risk_level代表投资策略（Action Card）的风险等级。（投资策略属性）
-def allowed_cards_for_user(user_risk_bucket: int) -> List[ActCard]:
+def allowed_cards_for_user(user_risk_bucket: int):
     """
     根据用户的风险等级，筛选出该用户被允许执行的“动作卡片”列表。
     一个投资策略的风险等级，必须小于或等于用户自身的风险等级（可能经过动态调整后）
@@ -31,7 +31,7 @@ def allowed_cards_for_user(user_risk_bucket: int) -> List[ActCard]:
 # 考虑交易成本：基于 diff 计算交易成本，并从最终的配置或现金中扣除。
 # 模拟渐进式调整：可能不会一步到位，而是设定一个调整速度，例如 new_alloc = current_alloc + speed * diff。
 # 设置阈值：如果 current_alloc 和 card.target_alloc 已经非常接近，则可能决定不执行任何操作以避免不必要的微小交易。
-def apply_action(current_alloc: np.ndarray, card: ActCard) -> np.ndarray:
+def apply_action(current_alloc: np.ndarray, card: ActCard):
     """
     将选定的动作卡片应用到当前的资产配置上。
     

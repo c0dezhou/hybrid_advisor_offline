@@ -49,4 +49,4 @@ def policy_based_rule(
         # 一致的配置来捕捉增长机会。”
         chosen_card = max(allowed_cards, key=lambda card: card.risk_level)
     
-    return chosen_card.action_id, chosen_card
+    return chosen_card.act_id, chosen_card

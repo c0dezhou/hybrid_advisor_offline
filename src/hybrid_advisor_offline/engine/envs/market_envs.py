@@ -37,40 +37,36 @@ class MarketEnv:
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0,0.0,1.0]) # 初始全现金
 
-        def _pre_mkt_sshots(self):
-            """
-            预先计算市场快照,
-            提前计算好每一天对应的市场快照（包含30天滚动收益率、波动率等）
-            """
-            print("为env预计算市场快照")
-            self.mkt_sshots = []
-
-            # 滚动计算的窗口
-            window = 30
-
-            # 定义年化因子：波动率（标准差）与时间的平方根成正比
-            annual_factor = np.sqrt(252) # 252是一年中的交易日数量
-
-            rolling_returens = self.mkt_data.pct_change().rolling(window=window).sum()
-            rolling_vols = self.daily_returns.rolling(window=window).std()*annual_factor
-
-            for i in range(self.n_steps):
-                if i <window:
-                    # 数据不够30个，用0代替
-                    sshot = MarketSnapshot(
-                        rolling_30d_returen=np.zeros(3),
-                        rolling_30d_vol=np.zeros(3),
-                        vix=0.0
-                    )
-                else:
-                    # 使用 SPY（标普500的ETF）的历史年化波动率作为VIX指数的一个近似替代
-                    vix_approx = rolling_vols.iloc[i]['SPY'] 
-                    sshot = MarketSnapshot(
-                        rolling_30d_returen=rolling_returens.iloc[i].values,
-                        rolling_returens=rolling_vols.iloc[i].values,
-                        vix=vix_approx
-                    )
-                    self.mkt_sshots.append(sshot)
+    def _pre_mkt_sshots(self):
+        """
+        预先计算市场快照,
+        提前计算好每一天对应的市场快照（包含30天滚动收益率、波动率等）
+        """
+        print("为env预计算市场快照")
+        self.mkt_sshots = []
+        # 滚动计算的窗口
+        window = 30
+        # 定义年化因子：波动率（标准差）与时间的平方根成正比
+        annual_factor = np.sqrt(252) # 252是一年中的交易日数量
+        rolling_returens = self.mkt_data.pct_change().rolling(window=window).sum()
+        rolling_vols = self.daily_returns.rolling(window=window).std()*annual_factor
+        for i in range(self.n_steps):
+            if i <window:
+                # 数据不够30个，用0代替
+                sshot = MarketSnapshot(
+                    rolling_30d_returen=np.zeros(3),
+                    rolling_30d_vol=np.zeros(3),
+                    vix=0.0
+                )
+            else:
+                # 使用 SPY（标普500的ETF）的历史年化波动率作为VIX指数的一个近似替代
+                vix_approx = rolling_vols.iloc[i]['SPY'] 
+                sshot = MarketSnapshot(
+                    rolling_30d_returen=rolling_returens.iloc[i].values,
+                    rolling_30d_vol=rolling_vols.iloc[i].values,
+                    vix=vix_approx
+                )
+            self.mkt_sshots.append(sshot)
 
     def reset(self):
         """重置环境到初始态，在一个episode开始被调用"""
@@ -111,11 +107,16 @@ class MarketEnv:
 
         #6. 移动到St+1
         self.curr_step +=1
-        done = self.curr_step> self.n_steps -1
+        # done = self.curr_step> self.n_steps -1
+        done = self.curr_step >= self.n_steps
+        # [ERROR] IndexError 是因为 MarketEnv.step 在推进到最后一个交易日后，
+        # 把 curr_step 加到了 n_steps，但仍然试图用这个索引访问 self.mkt_sshots[self.curr_step]。
+        # 列表长度是 n_steps，合法索引只有 0 … n_steps-1，所以一到结尾就越界了。
+        next_idx = min(self.curr_step, self.n_steps - 1)
 
         # 7.准备下一个state的信息
         next_info = {
-            "mkt_sshot": self.mkt_sshots[self.curr_step],
+            "mkt_sshot": self.mkt_sshots[next_idx],
             "curr_alloc": self.curr_alloc,
             "portfolio_value": self.portfolio_value,
         }

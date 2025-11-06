@@ -135,7 +135,7 @@ def make_up_to_vec(up: UserProfile):
 def build_state_vec(
     mkt_features: MarketSnapshot,
     user_profile: UserProfile,
-    current_alloc: np.ndarray,
+    curr_alloc: np.ndarray,
     user_vector: Optional[np.ndarray] = None
 ):
     """
@@ -163,7 +163,7 @@ def build_state_vec(
     # print(f"DEBUG: user_vec shape={user_vec.shape}")
 
     # 处理当前资产配置
-    alloc_vec = np.asarray(current_alloc, dtype=np.float32)
+    alloc_vec = np.asarray(curr_alloc, dtype=np.float32)
     # print(f"DEBUG: alloc_vec shape={alloc_vec.shape}")
 
     # 拼接前三项
@@ -173,7 +173,7 @@ def build_state_vec(
         alloc_vec
     ])
 
-    print(f"DEBUG: state_vector shape={state_vector.shape}")
+    # print(f"DEBUG: state_vector shape={state_vector.shape}")
     return state_vector
 
 _state_dim = None
