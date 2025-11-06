@@ -21,16 +21,13 @@ from hybrid_advisor_offline.engine.state.state_builder import (
     user_row_to_profile,
     make_up_to_vec,
 )
-from hybrid_advisor_offline.engine.rewards.reward_architect import compute_reward
+from hybrid_advisor_offline.engine.rewards.reward_architect import (
+    compute_reward,
+    get_accept_prob,
+)
 from hybrid_advisor_offline.engine.act_safety.act_filter import allowed_cards_for_user
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
 from hybrid_advisor_offline.engine.policy.policy_based_rule import policy_based_rule
-
-# # 兼容直接以脚本方式运行：把项目根目录加入 sys.path，保证绝对导入可用。
-# CURRENT_DIR = os.path.dirname(__file__)
-# PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "..", ".."))
-# if PROJECT_ROOT not in sys.path:
-#     sys.path.insert(0, PROJECT_ROOT)
 
 
 DATA_DIR = "./data"
@@ -39,7 +36,6 @@ DATA_DIR = "./data"
 # SHY：短期国债 ETF 使用SHY作为现金的模拟。原因：1.模拟无风险利率，2.可交易性 3.真实市场数据驱动
 _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
 
-# --- 常量定义 ---
 USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
 OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
 N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
@@ -179,15 +175,23 @@ def generate_offline_dataset():
     # 3. 准备列表以存储所有转换
     obss, acts, rwds, dones = [], [], [], []
 
+    # 为了解决生成500个轨迹速度慢的问题，
+    # 每个用户只在进入循环前调用一次 get_accept_prob(user_profile)，
+    # 并把结果随手缓存成变量 user_accept_prob；同理，allowed_cards_for_user 也在外层调用一次，
+    # 而不是每个时间步都重新筛卡。
+    # 循环内部就只做状态拼接、环境步进和一次 compute_reward(..., accept_prob=user_accept_prob)，
+    # 省掉了大量重复的 predict_proba 和卡片筛选
     print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
     for _, user_row in tqdm(sampled_users_df.iterrows(), total=len(sampled_users_df)):
         # 为当前用户创建一个经过清理的 UserProfile 对象
         user_profile = user_row_to_profile(user_row)
         user_vector = make_up_to_vec(user_profile)
-        
+        user_accept_prob = get_accept_prob(user_profile)
+        allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
+
         # 为每个新用户重置环境
         info = env.reset()
-        
+
         done = False
         while not done:
             # a. 构建当前状态
@@ -199,7 +203,6 @@ def generate_offline_dataset():
             )
 
             # b. 获取允许的动作，并使用基于规则的策略选择一个
-            allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
             action_id, _ = policy_based_rule(state_vec, allowed_cards, user_profile.risk_bucket)
 
             # c. 步进环境
@@ -207,7 +210,12 @@ def generate_offline_dataset():
 
             # d. 计算奖励
             # 为简单起见，在数据集生成阶段我们将忽略回撤
-            reward = compute_reward(market_return, user_profile, drawdown=0.0)
+            reward = compute_reward(
+                market_return,
+                user_profile,
+                drawdown=0.0,
+                accept_prob=user_accept_prob,
+            )
 
             # e. 存储转换
             obss.append(state_vec)
