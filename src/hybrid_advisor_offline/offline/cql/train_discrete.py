@@ -23,6 +23,10 @@ def _require_gpu():
     ) from exc
 
     if not torch.cuda.is_available():
+        print(
+            "未检测到可用 GPU。训练已终止。如需在 CPU 上运行，请重新执行命令并移除 --require-gpu 参数。",
+            file=sys.stderr,
+        )
         raise RuntimeError(
             "需要GPU，请检查环境"
         )
@@ -113,3 +117,44 @@ def load_cql_policy(require_gpu: bool = True) -> DiscreteCQL:
 
     print(f"已从 {MODEL_SAVE_PATH} 成功加载 CQL 策略")
     return policy    
+
+
+def _parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="使用离线数据集训练离散 Conservative Q-Learning 模型。",
+    )
+    parser.add_argument(
+        "--require-gpu",
+        action="store_true",
+        help="若指定，则检测并强制使用 GPU；若未检测到 GPU，则终止训练。",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help=f"自定义训练步数（默认使用 N_STEPS={N_STEPS}）。用于调试时可减小。",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = _parse_args()
+
+    global N_STEPS
+    if args.steps is not None:
+        N_STEPS = args.steps
+        print(f"使用自定义训练步数 N_STEPS={N_STEPS}")
+
+    try:
+        tarin_discrete_cql(require_gpu=args.require_gpu)
+    except RuntimeError as exc:
+        if args.require_gpu:
+            print(f"训练因 GPU 校验失败而退出：{exc}", file=sys.stderr)
+        else:
+            raise
+
+
+if __name__ == "__main__":
+    main()
