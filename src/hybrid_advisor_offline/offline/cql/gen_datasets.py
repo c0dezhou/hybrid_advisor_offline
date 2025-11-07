@@ -45,10 +45,13 @@ BEHAVIOR_META_SUFFIX = "_behavior.npz"
 # N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
 N_USERS_TO_SIMULATE = 10000  # 用于模拟的用户数量,生成10000条轨迹
 EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
-POLICY_EPS_START = 0.2  # 初始 ε
-POLICY_EPS_MIN = 0.02   # 探索下限，避免完全贪婪
-POLICY_EPS_DECAY = 0.999  # 每个 episode 后衰减，确保探索逐步收敛
+POLICY_EPS_START = float(os.getenv("POLICY_EPS_START", "0.4"))  # 初始 ε，鼓励探索
+POLICY_EPS_MIN = float(os.getenv("POLICY_EPS_MIN", "0.1"))     # 探索下限，避免完全贪婪
+POLICY_EPS_DECAY = float(os.getenv("POLICY_EPS_DECAY", "0.995"))  # 每个 episode 后衰减
 POLICY_SEED = 42
+
+DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
+DATASET_MIN_RETURN = float(os.getenv("DATASET_MIN_RETURN", "0.0"))  # 过滤低回报轨迹的阈值
 
 
 def _behavior_meta_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
@@ -193,6 +196,7 @@ def generate_offline_dataset():
     obss, acts, rwds, dones = [], [], [], []
     propensities: list[float] = []
     episode_ids: list[int] = []
+    ep_returns: list[float] = []
     rng = np.random.default_rng(POLICY_SEED)
     episode_counter = 0
 
@@ -218,6 +222,7 @@ def generate_offline_dataset():
 
         # 为每个新用户重置环境
         info = env.reset()
+        ep_return = 0.0
 
         done = False
         while not done:
@@ -250,6 +255,7 @@ def generate_offline_dataset():
                 drawdown=0.0,
                 accept_prob=user_accept_prob,
             )
+            ep_return += reward
 
             # e. 存储转换
             obss.append(state_vec)
@@ -263,14 +269,48 @@ def generate_offline_dataset():
             info = next_info
 
         episode_counter += 1
+        ep_returns.append(ep_return)
 
     print(f"\n总共生成了 {len(obss)} 个转换。")
+
+    # 3.1 轨迹质量过滤（可选）
+    def _filter_by_returns(e_returns, keep_frac, min_return):
+        keep_frac = max(0.0, min(1.0, keep_frac))
+        min_return = float(min_return)
+        if keep_frac >= 0.999 and min_return <= -1e9:
+            return None
+        sorted_eps = sorted(enumerate(e_returns), key=lambda kv: kv[1], reverse=True)
+        if not sorted_eps:
+            return None
+        keep_count = max(1, int(len(sorted_eps) * keep_frac))
+        keep_ids = {ep_id for ep_id, _ in sorted_eps[:keep_count]}
+        if min_return > -1e9:
+            for ep_id, total in sorted_eps:
+                if total >= min_return:
+                    keep_ids.add(ep_id)
+        if len(keep_ids) == len(e_returns):
+            return None
+        return keep_ids
+
+    keep_episode_ids = _filter_by_returns(ep_returns, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN if DATASET_MIN_RETURN is not None else -1e9)
 
     # 4. 创建并保存 d3rlpy MDPDataset
     obss_array = np.asarray(obss, dtype=np.float32)
     acts_array = np.asarray(acts, dtype=np.int64)
     rwds_array = np.asarray(rwds, dtype=np.float32)
     dones_array = np.asarray(dones, dtype=np.float32)
+    prop_array = np.asarray(propensities, dtype=np.float32)
+    episode_ids_array = np.asarray(episode_ids, dtype=np.int32)
+
+    if keep_episode_ids:
+        mask = np.isin(episode_ids_array, list(keep_episode_ids))
+        print(f"过滤低质量轨迹：保留 {mask.sum()} / {len(mask)} 步（{mask.sum()/len(mask):.2%}）。")
+        obss_array = obss_array[mask]
+        acts_array = acts_array[mask]
+        rwds_array = rwds_array[mask]
+        dones_array = dones_array[mask]
+        prop_array = prop_array[mask]
+        episode_ids_array = episode_ids_array[mask]
 
     dataset = MDPDataset(
         observations=obss_array,
@@ -287,9 +327,9 @@ def generate_offline_dataset():
     behavior_meta_path = _behavior_meta_path(OUTPUT_DATASET_PATH)
     np.savez(
         behavior_meta_path,
-        propensities=np.asarray(propensities, dtype=np.float32),
+        propensities=prop_array,
         actions=acts_array,
-        episode_ids=np.asarray(episode_ids, dtype=np.int32),
+        episode_ids=episode_ids_array,
         terminals=dones_array,
     )
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
@@ -347,3 +387,11 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# USE_CARD_FACTORY=1 \
+# POLICY_EPS_START=0.6 \
+# POLICY_EPS_MIN=0.2 \
+# POLICY_EPS_DECAY=0.997 \
+# DATASET_KEEP_TOP_FRAC=0.7 \
+# DATASET_MIN_RETURN=10 \
+# python -m hybrid_advisor_offline.offline.cql.gen_datasets

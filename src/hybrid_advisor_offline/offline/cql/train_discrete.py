@@ -15,11 +15,11 @@ MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
 MODEL_CONFIG_PATH = f"{MODEL_SAVE_PATH}.config.json"
 N_STEPS = 500000  # 训练步数
 N_STEPS_PER_EPOCH = int(os.getenv("CQL_STEPS_PER_EPOCH", "5000"))
-ALPHA = float(os.getenv("CQL_ALPHA", "0.02"))
-LEARNING_RATE = float(os.getenv("CQL_LR", "3e-4"))
+# 默认让 CQL 更加“大胆”：降低 alpha，减小学习率以避免不稳定
+ALPHA = float(os.getenv("CQL_ALPHA", "0.01"))
+LEARNING_RATE = float(os.getenv("CQL_LR", "2e-4"))
 N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
-TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "6000"))
-MIN_Q_WEIGHT = float(os.getenv("CQL_MIN_Q_WEIGHT", "1.0"))
+TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "8000"))
 USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
@@ -88,7 +88,6 @@ def tarin_discrete_cql(require_gpu: bool):
         learning_rate=LEARNING_RATE,
         n_critics=N_CRITICS,
         target_update_interval=TARGET_UPDATE_INTERVAL,
-        min_q_weight=MIN_Q_WEIGHT,
     )
     device =0 if require_gpu else False
     cql = config.create(device=device)
