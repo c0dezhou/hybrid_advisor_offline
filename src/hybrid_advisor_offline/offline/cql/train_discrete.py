@@ -15,10 +15,11 @@ MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
 MODEL_CONFIG_PATH = f"{MODEL_SAVE_PATH}.config.json"
 N_STEPS = 500000  # 训练步数
 N_STEPS_PER_EPOCH = int(os.getenv("CQL_STEPS_PER_EPOCH", "5000"))
-ALPHA = float(os.getenv("CQL_ALPHA", "0.1"))
+ALPHA = float(os.getenv("CQL_ALPHA", "0.02"))
 LEARNING_RATE = float(os.getenv("CQL_LR", "3e-4"))
 N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
-TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "4000"))
+TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "6000"))
+MIN_Q_WEIGHT = float(os.getenv("CQL_MIN_Q_WEIGHT", "1.0"))
 USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
@@ -87,6 +88,7 @@ def tarin_discrete_cql(require_gpu: bool):
         learning_rate=LEARNING_RATE,
         n_critics=N_CRITICS,
         target_update_interval=TARGET_UPDATE_INTERVAL,
+        min_q_weight=MIN_Q_WEIGHT,
     )
     device =0 if require_gpu else False
     cql = config.create(device=device)
@@ -256,3 +258,15 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+"""
+loss越来越大了，说明保守项在强行拉回策略，进一步下调 alpha（例如 0.02 甚至 0.01），减轻 conservative 项，调低lr至 3e-4 或 2e-4
+Epoch 11/100: 100%|████████████████| 8000/8000 [01:27<00:00, 91.15it/s, loss=2.38, td_loss=2.23, conservative_loss=2.95]
+2025-11-07 20:50.44 [info     ] DiscreteCQL_20251107203504: epoch=11 step=88000 epoch=11 metrics={'time_sample_batch': 0
+.0003294392228126526, 'time_algorithm_update': 0.010565196573734283, 'loss': 2.3805395580269395, 'td_loss': 2.2329370494
+629255, 'conservative_loss': 2.9520501913130284, 'time_step': 0.010950414955615998} step=88000
+2025-11-07 20:50.44 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107203504/model_88000.d3
+Epoch 12/100:   8%|█▎               | 641/8000 [00:06<01:19, 92.48it/s, loss=2.18, td_loss=2.03, conservative_loss=2.91]
+Epoch 12/100:   8%|█▎               | 644/8000 [00:06<01:19, 92.36it/s, loss=2.18, td_loss=2.03, conservative_loss=2.91]
+"""
