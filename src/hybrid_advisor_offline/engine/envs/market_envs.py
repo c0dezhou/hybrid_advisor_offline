@@ -17,7 +17,7 @@ class MarketEnv:
 
     合规性：再平衡操作的设计必须通过合规部门的预先批准
     """
-    def __init__(self):
+    def __init__(self, *, max_episode_steps: int | None = None):
         if not os.path.exists(DATA_FILE):
             raise FileNotFoundError(
                 f"市场数据未找到：{DATA_FILE}"
@@ -28,12 +28,14 @@ class MarketEnv:
         # 计算当前行与前一行的变化率，公式为 (当前值 - 上一值) / 上一值，即每日收益率
         self.daily_returns = self.mkt_data.pct_change().fillna(0)# 第一天NaN填充为0
         self.n_steps = len(self.mkt_data) #交易日总数，也就是模拟的总步数
+        self.max_episode_steps = max_episode_steps or self.n_steps
     
         # 为每个时间步预先计算市场快照
         self._pre_mkt_sshots()
 
         # env
         self.curr_step = 0
+        self.steps_in_episode = 0
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0,0.0,1.0]) # 初始全现金
 
@@ -71,6 +73,7 @@ class MarketEnv:
     def reset(self):
         """重置环境到初始态，在一个episode开始被调用"""
         self.curr_step = 0
+        self.steps_in_episode = 0
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0, 0.0, 1.0])
 
@@ -106,9 +109,12 @@ class MarketEnv:
         self.portfolio_value *= (1+portfolio_daily_return)
 
         #6. 移动到St+1
-        self.curr_step +=1
-        # done = self.curr_step> self.n_steps -1
-        done = self.curr_step >= self.n_steps
+        self.curr_step += 1
+        self.steps_in_episode += 1
+        done = (
+            self.curr_step >= self.n_steps
+            or self.steps_in_episode >= self.max_episode_steps
+        )
         # [ERROR] IndexError 是因为 MarketEnv.step 在推进到最后一个交易日后，
         # 把 curr_step 加到了 n_steps，但仍然试图用这个索引访问 self.mkt_sshots[self.curr_step]。
         # 列表长度是 n_steps，合法索引只有 0 … n_steps-1，所以一到结尾就越界了。
@@ -144,6 +150,5 @@ if __name__ == '__main__':
         )
     
     print("\n环境模拟测试完成。")
-
 
 

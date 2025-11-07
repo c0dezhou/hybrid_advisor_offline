@@ -12,7 +12,14 @@ from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_ac
 
 DATASET_PATH = "./data/offline_dataset.h5"
 MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
-N_STEPS = 500000 # 训练步数
+MODEL_CONFIG_PATH = f"{MODEL_SAVE_PATH}.config.json"
+N_STEPS = 500000  # 训练步数
+N_STEPS_PER_EPOCH = int(os.getenv("CQL_STEPS_PER_EPOCH", "5000"))
+ALPHA = float(os.getenv("CQL_ALPHA", "0.1"))
+LEARNING_RATE = float(os.getenv("CQL_LR", "3e-4"))
+N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
+TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "4000"))
+USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
     try:
@@ -41,9 +48,12 @@ def _standard_dataset(dataset: ReplayBuffer):
     """
     obs_stand = StandardObservationScaler()
     obs_stand.fit_with_transition_picker(dataset.episodes, dataset.transition_picker)
-    rew_stand = StandardRewardScaler()
-    rew_stand.fit_with_transition_picker(dataset.episodes, dataset.transition_picker)
-    return obs_stand,rew_stand
+    if USE_REWARD_SCALER:
+        rew_stand = StandardRewardScaler()
+        rew_stand.fit_with_transition_picker(dataset.episodes, dataset.transition_picker)
+    else:
+        rew_stand = None
+    return obs_stand, rew_stand
 
 def tarin_discrete_cql(require_gpu: bool):
     """
@@ -73,15 +83,23 @@ def tarin_discrete_cql(require_gpu: bool):
     config = DiscreteCQLConfig(
         observation_scaler=obs_stand,
         reward_scaler=rew_stand,
+        alpha=ALPHA,
+        learning_rate=LEARNING_RATE,
+        n_critics=N_CRITICS,
+        target_update_interval=TARGET_UPDATE_INTERVAL,
     )
     device =0 if require_gpu else False
     cql = config.create(device=device)
 
-    print(f"{dataset.size()} 条轨迹上训练 DiscreteCQL，共 {N_STEPS} 步")
+    print(
+        f"{dataset.size()} 条轨迹上训练 DiscreteCQL，共 {N_STEPS} 步 "
+        f"(alpha={ALPHA}, lr={LEARNING_RATE}, n_critics={N_CRITICS}, "
+        f"steps/epoch={N_STEPS_PER_EPOCH}, reward_scaler={'on' if USE_REWARD_SCALER else 'off'})"
+    )
     cql.fit(
         train_buff,
         n_steps=N_STEPS,
-        n_steps_per_epoch=1000,
+        n_steps_per_epoch=N_STEPS_PER_EPOCH,
         logger_adapter=FileAdapterFactory(root_dir="d3rlpy_logs/cql"),
         show_progress=True,
     )
@@ -89,6 +107,23 @@ def tarin_discrete_cql(require_gpu: bool):
     if not os.path.exists("./models"):
         os.makedirs("./models")
     cql.save_model(MODEL_SAVE_PATH)
+    config_payload = {
+        "alpha": ALPHA,
+        "learning_rate": LEARNING_RATE,
+        "n_critics": N_CRITICS,
+        "target_update_interval": TARGET_UPDATE_INTERVAL,
+        "n_steps_per_epoch": N_STEPS_PER_EPOCH,
+        "use_reward_scaler": USE_REWARD_SCALER,
+    }
+    try:
+        import json
+
+        with open(MODEL_CONFIG_PATH, "w", encoding="utf-8") as cfg_file:
+            json.dump(config_payload, cfg_file, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(f"警告：写入模型配置 {MODEL_CONFIG_PATH} 失败：{exc}", file=sys.stderr)
+    else:
+        print(f"训练配置已保存至 {MODEL_CONFIG_PATH}")
     print(f"\n训练完成，模型已保存至 {MODEL_SAVE_PATH}")
 
 def load_cql_policy(require_gpu: bool = True) -> DiscreteCQL:
@@ -109,6 +144,10 @@ def load_cql_policy(require_gpu: bool = True) -> DiscreteCQL:
     config = DiscreteCQLConfig(
         observation_scaler=obs_scaler,
         reward_scaler=rew_scaler,
+        alpha=ALPHA,
+        learning_rate=LEARNING_RATE,
+        n_critics=N_CRITICS,
+        target_update_interval=TARGET_UPDATE_INTERVAL,
     )
     device = 0 if require_gpu else False
     policy = config.create(device=device)
@@ -136,16 +175,75 @@ def _parse_args():
         default=None,
         help=f"自定义训练步数（默认使用 N_STEPS={N_STEPS}）。用于调试时可减小。",
     )
+    parser.add_argument(
+        "--steps-per-epoch",
+        type=int,
+        default=None,
+        help=f"每个 epoch 内的更新步数（默认 {N_STEPS_PER_EPOCH}）。",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=None,
+        help=f"CQL 保守系数（默认 {ALPHA}，数值越大越保守）。",
+    )
+    parser.add_argument(
+        "--learning-rate",
+        type=float,
+        default=None,
+        help=f"优化器学习率（默认 {LEARNING_RATE}）。",
+    )
+    parser.add_argument(
+        "--n-critics",
+        type=int,
+        default=None,
+        help=f"Critic 数量（默认 {N_CRITICS}）。",
+    )
+    parser.add_argument(
+        "--target-update-interval",
+        type=int,
+        default=None,
+        help=f"Target 网络更新步间隔（默认 {TARGET_UPDATE_INTERVAL}）。",
+    )
+    parser.add_argument(
+        "--no-reward-scaler",
+        action="store_true",
+        help="禁用 reward scaler，直接使用原始奖励值。",
+    )
     return parser.parse_args()
 
 
 def main():
     args = _parse_args()
 
-    global N_STEPS
+    global N_STEPS, N_STEPS_PER_EPOCH, ALPHA, LEARNING_RATE, N_CRITICS, TARGET_UPDATE_INTERVAL, USE_REWARD_SCALER
     if args.steps is not None:
         N_STEPS = args.steps
         print(f"使用自定义训练步数 N_STEPS={N_STEPS}")
+    if args.steps_per_epoch is not None:
+        global N_STEPS_PER_EPOCH
+        N_STEPS_PER_EPOCH = args.steps_per_epoch
+        print(f"使用自定义 steps_per_epoch={N_STEPS_PER_EPOCH}")
+    if args.alpha is not None:
+        global ALPHA
+        ALPHA = args.alpha
+        print(f"使用自定义 alpha={ALPHA}")
+    if args.learning_rate is not None:
+        global LEARNING_RATE
+        LEARNING_RATE = args.learning_rate
+        print(f"使用自定义 learning_rate={LEARNING_RATE}")
+    if args.n_critics is not None:
+        global N_CRITICS
+        N_CRITICS = args.n_critics
+        print(f"使用自定义 n_critics={N_CRITICS}")
+    if args.target_update_interval is not None:
+        global TARGET_UPDATE_INTERVAL
+        TARGET_UPDATE_INTERVAL = args.target_update_interval
+        print(f"使用自定义 target_update_interval={TARGET_UPDATE_INTERVAL}")
+    if args.no_reward_scaler:
+        global USE_REWARD_SCALER
+        USE_REWARD_SCALER = False
+        print("已禁用 reward scaler，训练将使用原始奖励值。")
 
     try:
         tarin_discrete_cql(require_gpu=args.require_gpu)

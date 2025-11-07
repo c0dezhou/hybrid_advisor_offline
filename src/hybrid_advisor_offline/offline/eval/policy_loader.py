@@ -1,4 +1,5 @@
 # 加载已训练的 CQL 策略，并复用训练时的 scaler。
+import json
 import os,sys
 from typing import Optional, Tuple
 
@@ -13,7 +14,9 @@ from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
 
 def build_scalers(
     replay_buffer: ReplayBuffer,
-):
+    *,
+    use_reward_scaler: bool = True,
+) -> Tuple[StandardObservationScaler, Optional[StandardRewardScaler]]:
     """
     基于离线数据集拟合观测与奖励标准化器。
     """
@@ -23,11 +26,14 @@ def build_scalers(
         replay_buffer.transition_picker,
     )
 
-    rew_scaler = StandardRewardScaler()
-    rew_scaler.fit_with_transition_picker(
-        replay_buffer.episodes,
-        replay_buffer.transition_picker,
-    )
+    if use_reward_scaler:
+        rew_scaler = StandardRewardScaler()
+        rew_scaler.fit_with_transition_picker(
+            replay_buffer.episodes,
+            replay_buffer.transition_picker,
+        )
+    else:
+        rew_scaler = None
     return obs_scaler, rew_scaler
 
 
@@ -84,11 +90,17 @@ def load_trained_policy(
             f"未找到已训练的策略模型：{model_path}"
         )
 
-    obs_scaler, rew_scaler = build_scalers(replay_buffer)
+    train_cfg = _load_training_config(model_path)
+    use_reward_scaler = train_cfg.get("use_reward_scaler", True)
+    obs_scaler, rew_scaler = build_scalers(replay_buffer, use_reward_scaler=use_reward_scaler)
 
     config = DiscreteCQLConfig(
         observation_scaler=obs_scaler,
         reward_scaler=rew_scaler,
+        alpha=train_cfg.get("alpha", 1.0),
+        learning_rate=train_cfg.get("learning_rate", 3e-4),
+        n_critics=train_cfg.get("n_critics", 1),
+        target_update_interval=train_cfg.get("target_update_interval", 8000),
     )
     device = 0 if require_gpu else False
     policy = config.create(device=device)
@@ -118,3 +130,13 @@ def load_trained_policy(
     policy.build_with_dataset(dataset_for_build)
     policy.load_model(model_path)
     return policy
+def _load_training_config(model_path: str) -> dict:
+    cfg_path = f"{model_path}.config.json"
+    if not os.path.exists(cfg_path):
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as cfg_file:
+            return json.load(cfg_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"警告：读取模型配置 {cfg_path} 失败：{exc}", file=sys.stderr)
+        return {}

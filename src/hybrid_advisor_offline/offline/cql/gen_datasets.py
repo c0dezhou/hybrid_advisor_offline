@@ -42,7 +42,9 @@ USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
 OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
 # N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
-N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
+# N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
+N_USERS_TO_SIMULATE = 10000  # 用于模拟的用户数量,生成10000条轨迹
+EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
 POLICY_EPS_START = 0.2  # 初始 ε
 POLICY_EPS_MIN = 0.02   # 探索下限，避免完全贪婪
 POLICY_EPS_DECAY = 0.999  # 每个 episode 后衰减，确保探索逐步收敛
@@ -178,8 +180,9 @@ def generate_offline_dataset():
 
     # 2. 初始化环境并获取状态维度
     try:
-        env = MarketEnv()
+        env = MarketEnv(max_episode_steps=EPISODE_MAX_STEPS)
         obs_dim = get_state_dim()
+        print(f"环境初始化成功，单条轨迹最大步数: {EPISODE_MAX_STEPS}")
         print(f"obs维度: {obs_dim}")
     except (FileNotFoundError, RuntimeError) as e:
         print(f"初始化环境时出错: {e}")

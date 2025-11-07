@@ -154,7 +154,7 @@ if __name__ == "__main__":
     main()
 
 """
-评估问题：
+第一次评估问题：
 === 评估结果 === { "fqe": { "train_initial_state_value": 24.160295486450195, 
 "train_average_value": 24.16844964198235, 
 "val_initial_state_value": 20.5911808013916, 
@@ -173,4 +173,34 @@ next step:
 在 FQE 中新增“按 episode 累计回报”的 scorer，或把 FQE 的折现值换算成累计值，再与 CPE 的 episode_return_mean 比。
 改进数据生成策略：为 rule_based_policy 加入随机扰动或多套脚本，并在轨迹里记录行为策略概率，方便后续真正计算 IPS/SNIPS/DR。
 重新训练 CQL：提高 N_STEPS（至少与样本量同量级）、调大 conservative 系数等关键超参，并确保 FQE 使用与训练一致的奖励/观测 scaler；同时可考虑缩短 episode（例如每年重置）以减轻长序列带来的偏差。
+"""
+
+"""
+第二次评估问题
+=== 评估结果 ===
+{
+"fqe": {
+"train_initial_state_value": 22.803264617919922,
+"train_average_value": 22.80846461001513,
+"val_initial_state_value": 22.754600524902344,
+"val_average_value": 22.759357462554785,
+"train_avg_reward_per_step": 0.2280846461001515,
+"train_avg_episode_length": 5207.0,
+"train_est_episode_return": 1187.636752243489,
+"val_avg_reward_per_step": 0.22759357462554805,
+"val_avg_episode_length": 5207.0,
+"val_est_episode_return": 1185.0797430752286
+},
+"cpe": {
+"episode_return_mean": 1189.7967247161864,
+"ips": 0.22832407419602896,
+"snips": 0.22832407419602896
+}
+}
+
+FQE 现在直接把 AverageValueEstimationEvaluator 转成“每步奖励 + 估计的整段收益”，所以 train_avg_reward_per_step≈0.228、train_est_episode_return≈1188 跟 CPE 的 episode_return_mean≈1189.8 完全一致，说明评估并没有说策略更差，而是告诉我们：训练出的策略基本复制了行为策略。
+造成这种“看起来还是很差”的原因主要有：
+数据集仍由单一规则策略生成，ε 只有 0.1 且动作集只有 5 张卡，导致 RL 几乎只能拟合已有策略的行为；FQE/CPE 自然回到和 baseline 接近的数值。
+奖励函数本身以“市场回报 + 0.5×接受概率”为主，均值≈0.228、总长≈5200 步，强化学习即使完全照抄也能得到同样的回报；但若想看到改进，需要更有区分度的奖励或缩短 episode（否则任何改进都被 5200 步平均化）。
+训练配置还是默认的 N_STEPS=50k，远小于 260 万 transition；再加上 conservative loss 的 α=1.0，模型极度保守，不太可能探索新的分布。
 """
