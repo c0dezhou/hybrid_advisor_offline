@@ -77,6 +77,20 @@ def test_eval_pipeline_produces_positive_value(tmp_path):
     )
     dataset_path = tmp_path / "offline_dataset.h5"
     replay_buffer.dump(str(dataset_path))
+    behavior_meta_path = dataset_path.with_name(f"{dataset_path.stem}_behavior.npz")
+    total_steps = sum(ep.transition_count for ep in replay_buffer.episodes)
+    propensities = np.full(total_steps, 0.5, dtype=np.float32)
+    actions = np.zeros(total_steps, dtype=np.int64)
+    episode_ids = np.zeros(total_steps, dtype=np.int32)
+    terminals = np.zeros(total_steps, dtype=np.float32)
+    terminals[-1] = 1.0
+    np.savez(
+        behavior_meta_path,
+        propensities=propensities,
+        actions=actions,
+        episode_ids=episode_ids,
+        terminals=terminals,
+    )
 
     # 构建最小训练数据集并训练一个离散 CQL 策略
     dataset = _build_toy_dataset()
@@ -117,9 +131,13 @@ def test_eval_pipeline_produces_positive_value(tmp_path):
         require_gpu=False,
     )
 
-    cpe_metrics = compute_cpe_report(loaded_buffer)
+    cpe_metrics = compute_cpe_report(
+        loaded_buffer,
+        behavior_meta_path=str(behavior_meta_path),
+    )
 
     assert fqe_metrics["train_initial_state_value"] > 0.5
     assert fqe_metrics["train_average_value"] > 0.5
+    assert fqe_metrics["train_avg_reward_per_step"] > 0.0
     assert cpe_metrics["episode_return_mean"] > 0.5
     assert cpe_metrics["ips"] > 0.5

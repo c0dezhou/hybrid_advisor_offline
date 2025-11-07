@@ -10,6 +10,7 @@
 
 import argparse
 import json
+import os
 from typing import Any, Dict
 
 from hybrid_advisor_offline.offline.eval.fqe_data import (
@@ -28,6 +29,16 @@ except ImportError:  # pragma: no cover
         raise RuntimeError("GPU 校验函数缺失，请确认 train_discrete 模块可用。")
 
 MODEL_PATH_DEFAULT = "./models/cql_discrete_model.pt"
+BEHAVIOR_META_SUFFIX = "_behavior.npz"
+
+
+def _behavior_meta_path(dataset_path: str, override: str | None) -> str | None:
+    if override:
+        return override
+    base, ext = os.path.splitext(dataset_path)
+    if not base:
+        return None
+    return f"{base}{BEHAVIOR_META_SUFFIX}"
 
 
 def parse_args():
@@ -80,6 +91,12 @@ def parse_args():
         action="store_true",
         help="跳过基于行为策略的 CPE 指标。",
     )
+    parser.add_argument(
+        "--behavior-meta",
+        type=str,
+        default=None,
+        help="行为策略倾向文件路径（默认与 dataset 同名前缀 + _behavior.npz）。",
+    )
     return parser.parse_args()
 
 
@@ -112,12 +129,17 @@ def main() -> None:
         require_gpu=args.require_gpu,
     )
 
+    behavior_meta_path = _behavior_meta_path(args.dataset, args.behavior_meta)
+
     cpe_metrics: Dict[str, Any] = {}
     if args.no_cpe:
         print("跳过 CPE 评估。")
     else:
         print("--- 计算行为策略 CPE 指标 (IPS / SNIPS) ---")
-        cpe_metrics = compute_cpe_report(replay_buffer)
+        cpe_metrics = compute_cpe_report(
+            replay_buffer,
+            behavior_meta_path=behavior_meta_path,
+        )
 
     summary = {
         "fqe": fqe_metrics,
@@ -130,3 +152,25 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+"""
+评估问题：
+=== 评估结果 === { "fqe": { "train_initial_state_value": 24.160295486450195, 
+"train_average_value": 24.16844964198235, 
+"val_initial_state_value": 20.5911808013916, 
+"val_average_value": 20.592881008539315 }, 
+"cpe": { "episode_return_mean": 1239.2344229354858, 
+"ips": 0.23799393563508248, 
+"snips": 0.23799393563508248 } }
+问题：
+FQE 输出的 val_average_value≈20 是折现价值（AverageValueEstimationEvaluator），单位接近“每步 reward/(1−γ)”。CPE 里的 episode_return_mean≈1239 则是 5 198 步累计回报，两者量纲不同，因此不能直接比较。
+数据集中每步奖励约 0.238（市场收益 + 0.5×用户接受度），乘以 5 198 步正好得到 1 200+ 的 episode return，与 CPE 数字一致，说明评估流程本身没错，是解读出了偏差。
+数据覆盖严重不足：规则策略几乎只访问动作 {0,2,4}，占 259 万步全部记录，动作 {1,3,5} 根本没有样本，CQL/FQE 对未见动作无从学习，自然难以超越基线。
+训练和评估的奖励尺度不一致。CQL 用 StandardRewardScaler，FQE 则直接吃未经缩放的奖励，导致数值对不上；同时 50 000 步对 260 万步规模的 dataset 来说也远远不够。
+IPS/SNIPS 因为没有行为策略概率（propensity），实际上退化成“平均每步奖励”，目前没有参考价值。
+
+next step:
+在 FQE 中新增“按 episode 累计回报”的 scorer，或把 FQE 的折现值换算成累计值，再与 CPE 的 episode_return_mean 比。
+改进数据生成策略：为 rule_based_policy 加入随机扰动或多套脚本，并在轨迹里记录行为策略概率，方便后续真正计算 IPS/SNIPS/DR。
+重新训练 CQL：提高 N_STEPS（至少与样本量同量级）、调大 conservative 系数等关键超参，并确保 FQE 使用与训练一致的奖励/观测 scaler；同时可考虑缩短 episode（例如每年重置）以减轻长序列带来的偏差。
+"""

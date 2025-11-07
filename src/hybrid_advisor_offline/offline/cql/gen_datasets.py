@@ -1,14 +1,16 @@
 # fetch data
+import argparse
 import io
 import os
+import sys
 import time
+import subprocess
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
 from ucimlrepo import fetch_ucirepo
 
-import sys
 from tqdm import tqdm
 from d3rlpy.dataset import MDPDataset
 from d3rlpy.constants import ActionSpace
@@ -38,7 +40,19 @@ _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
 
 USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
 OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
-N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
+BEHAVIOR_META_SUFFIX = "_behavior.npz"
+# N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
+N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
+POLICY_EPS_START = 0.2  # 初始 ε
+POLICY_EPS_MIN = 0.02   # 探索下限，避免完全贪婪
+POLICY_EPS_DECAY = 0.999  # 每个 episode 后衰减，确保探索逐步收敛
+POLICY_SEED = 42
+
+
+def _behavior_meta_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
+    """根据数据集路径推导行为策略统计文件路径。"""
+    base, _ = os.path.splitext(dataset_path)
+    return f"{base}{BEHAVIOR_META_SUFFIX}"
 
 def _fetch_data_from_yf(ticker, maxretry, base_sleep_second):
     for attempt in range(1, maxretry + 1):
@@ -174,6 +188,10 @@ def generate_offline_dataset():
 
     # 3. 准备列表以存储所有转换
     obss, acts, rwds, dones = [], [], [], []
+    propensities: list[float] = []
+    episode_ids: list[int] = []
+    rng = np.random.default_rng(POLICY_SEED)
+    episode_counter = 0
 
     # 为了解决生成500个轨迹速度慢的问题，
     # 每个用户只在进入循环前调用一次 get_accept_prob(user_profile)，
@@ -189,6 +207,12 @@ def generate_offline_dataset():
         user_accept_prob = get_accept_prob(user_profile)
         allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
 
+        # 计算当前 episode 的 ε 值：指数衰减 + 下限，避免后期完全失去探索
+        episode_eps = max(
+            POLICY_EPS_MIN,
+            POLICY_EPS_START * (POLICY_EPS_DECAY ** episode_counter),
+        )
+
         # 为每个新用户重置环境
         info = env.reset()
 
@@ -203,7 +227,14 @@ def generate_offline_dataset():
             )
 
             # b. 获取允许的动作，并使用基于规则的策略选择一个
-            action_id, _ = policy_based_rule(state_vec, allowed_cards, user_profile.risk_bucket)
+            action_id, _, propensity = policy_based_rule(
+                state_vec,
+                allowed_cards,
+                user_profile.risk_bucket,
+                exploration_rate=episode_eps,
+                rng=rng,
+                return_propensity=True,
+            )
 
             # c. 步进环境
             market_return, done, next_info = env.step(action_id)
@@ -222,9 +253,13 @@ def generate_offline_dataset():
             acts.append(action_id)
             rwds.append(reward)
             dones.append(done)
+            propensities.append(float(propensity))
+            episode_ids.append(episode_counter)
 
             # 更新循环所使用的环境信息
             info = next_info
+
+        episode_counter += 1
 
     print(f"\n总共生成了 {len(obss)} 个转换。")
 
@@ -246,7 +281,66 @@ def generate_offline_dataset():
     dataset.dump(OUTPUT_DATASET_PATH)
     print(f"离线数据集已保存至 {OUTPUT_DATASET_PATH}")
 
-if __name__ == "__main__":
+    behavior_meta_path = _behavior_meta_path(OUTPUT_DATASET_PATH)
+    np.savez(
+        behavior_meta_path,
+        propensities=np.asarray(propensities, dtype=np.float32),
+        actions=acts_array,
+        episode_ids=np.asarray(episode_ids, dtype=np.int32),
+        terminals=dones_array,
+    )
+    print(f"行为策略倾向已保存至 {behavior_meta_path}")
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="生成离线数据集，可选地触发评估管线。",
+    )
+    parser.add_argument(
+        "--re-eval",
+        action="store_true",
+        help="生成数据后立即运行 eval_policy 对最新数据/模型做一次评估。",
+    )
+    parser.add_argument(
+        "--eval-model",
+        type=str,
+        default="./models/cql_discrete_model.pt",
+        help="评估所使用的模型路径（默认: ./models/cql_discrete_model.pt）。",
+    )
+    parser.add_argument(
+        "--extra-eval-args",
+        nargs=argparse.REMAINDER,
+        help="传递给评估脚本的附加参数（放在 --extra-eval-args 之后）。",
+    )
+    return parser.parse_args()
+
+
+def _run_evaluation(model_path: str, extra_args: list[str] | None = None) -> None:
+    cmd = [
+        sys.executable,
+        "-m",
+        "hybrid_advisor_offline.offline.eval.eval_policy",
+        "--dataset",
+        OUTPUT_DATASET_PATH,
+        "--model",
+        model_path,
+    ]
+    if extra_args:
+        cmd.extend(extra_args)
+    print("\n--- 重新运行评估 ---")
+    print(" ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def main():
+    args = _parse_args()
+
     # download_mkt_data()
     generate_offline_dataset()
     print("\n离线数据集生成过程完成。")
+
+    if args.re_eval:
+        _run_evaluation(args.eval_model, args.extra_eval_args)
+
+
+if __name__ == "__main__":
+    main()

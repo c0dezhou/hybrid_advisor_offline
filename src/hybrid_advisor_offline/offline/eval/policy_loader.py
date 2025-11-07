@@ -99,17 +99,22 @@ def load_trained_policy(
     dataset_info = getattr(replay_buffer, "dataset_info", None)
     dataset_action_size = getattr(dataset_info, "action_size", None)
 
-    if action_size is None:
-        action_size = dataset_action_size
-    elif dataset_action_size is not None and action_size != dataset_action_size:
+    resolved_action_size = action_size if action_size is not None else dataset_action_size
+    if resolved_action_size is None:
+        raise ValueError("无法推断动作空间大小，请通过 action_size 参数显式指定。")
+
+    if (
+        action_size is not None
+        and dataset_action_size is not None
+        and action_size != dataset_action_size
+    ):
         print(
             f"警告：传入的 action_size={action_size} 与数据集记录的 "
-            f"action_size={dataset_action_size} 不一致，将使用数据集的设定。",
+            f"action_size={dataset_action_size} 不一致，将优先使用显式传入的值。",
             file=sys.stderr,
         )
-        action_size = dataset_action_size
 
-    dataset_for_build = _buffer_to_dataset(replay_buffer, action_size)
+    dataset_for_build = _buffer_to_dataset(replay_buffer, resolved_action_size)
     policy.build_with_dataset(dataset_for_build)
     policy.load_model(model_path)
     return policy

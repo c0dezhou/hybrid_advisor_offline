@@ -12,7 +12,7 @@ from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_ac
 
 DATASET_PATH = "./data/offline_dataset.h5"
 MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
-N_STEPS = 50000 # 训练步数
+N_STEPS = 500000 # 训练步数
 
 def _require_gpu():
     try:

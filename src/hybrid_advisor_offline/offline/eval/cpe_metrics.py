@@ -19,8 +19,9 @@ on-policy 平均：直接对数据集中的收益取平均值（等价于假设 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 from d3rlpy.dataset import ReplayBuffer
@@ -33,14 +34,64 @@ class CPESample:
     reward: float
     propensity: float
 
+@dataclass
+class BehaviorMetadata:
+    propensities: np.ndarray
+    actions: Optional[np.ndarray] = None
+    episode_ids: Optional[np.ndarray] = None
 
-def collect_cpe_samples(buffer: ReplayBuffer):
+    @property
+    def size(self) -> int:
+        return len(self.propensities)
+
+
+def load_behavior_metadata(path: Optional[str]) -> Optional[BehaviorMetadata]:
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        data = np.load(path, allow_pickle=False)
+    except OSError as exc:
+        logger.warning("无法读取行为策略倾向文件 %s：%s", path, exc)
+        return None
+
+    prop = np.asarray(data.get("propensities"), dtype=np.float32)
+    if prop.size == 0:
+        logger.warning("行为策略倾向文件 %s 为空。", path)
+        return None
+    actions = data.get("actions")
+    episode_ids = data.get("episode_ids")
+    return BehaviorMetadata(
+        propensities=prop,
+        actions=np.asarray(actions) if actions is not None else None,
+        episode_ids=np.asarray(episode_ids) if episode_ids is not None else None,
+    )
+
+
+def collect_cpe_samples(buffer: ReplayBuffer, behavior_meta: Optional[BehaviorMetadata]):
     """从 ReplayBuffer 中提取奖励与 propensity。"""
     samples: List[CPESample] = []
+    propensities = None
+    total_steps = sum(ep.transition_count for ep in buffer.episodes)
+    if behavior_meta is not None:
+        if behavior_meta.size == total_steps:
+            propensities = behavior_meta.propensities
+        else:
+            logger.warning(
+                "行为策略倾向数量(%d)与轨迹步数(%d)不一致，回退为 1.0。",
+                behavior_meta.size,
+                total_steps,
+            )
+
+    idx = 0
     for episode in buffer.episodes:
         rewards = np.asarray(episode.rewards, dtype=np.float32).reshape(-1)
         for reward in rewards:
-            samples.append(CPESample(reward=float(reward), propensity=1.0))
+            if propensities is None:
+                propensity = 1.0
+            else:
+                propensity = float(propensities[idx])
+            samples.append(CPESample(reward=float(reward), propensity=max(propensity, 1e-6)))
+            idx += 1
     return samples
 
 
@@ -74,17 +125,18 @@ def mean_episode_return(buffer: ReplayBuffer):
     return float(np.mean(returns))
 
 
-def compute_cpe_report(buffer: ReplayBuffer):
+def compute_cpe_report(buffer: ReplayBuffer, behavior_meta_path: Optional[str] = None):
     """
     计算离线日志上的 IPS / SNIPS / 平均回报等指标。
     """
-    samples = collect_cpe_samples(buffer)
+    behavior_meta = load_behavior_metadata(behavior_meta_path)
+    samples = collect_cpe_samples(buffer, behavior_meta)
     if not samples:
         logger.warning("CPE 样本为空，返回 0 指标。")
         return {"episode_return_mean": 0.0, "ips": 0.0, "snips": 0.0}
 
-    if any(abs(s.propensity - 1.0) > 1e-6 for s in samples):
-        logger.info("检测到非 1.0 的 propensity，使用提供的行为概率。")
+    if behavior_meta is not None and behavior_meta.size:
+        logger.info("检测到行为策略倾向信息，共 %d 条记录。", behavior_meta.size)
     else:
         logger.info(
             "propensity 信息缺失，默认为 1.0 —— 结果等价于 on-policy 平均。"

@@ -1,5 +1,6 @@
+import os
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional, Union
 
 from hybrid_advisor_offline.engine.act_safety.act_card_def import ActCard
 
@@ -7,6 +8,9 @@ from hybrid_advisor_offline.engine.act_safety.act_card_def import ActCard
 # 如果从状态向量中提取出的 VIX 水平（或其代理）超过这个值，就被认为是高波动性市场。
 # 这是一个简化处理；真实系统可能会使用更动态的阈值。
 HIGH_VOLATILITY_THRESHOLD = 0.20
+# 通过环境变量 `RULE_POLICY_EPS` 可配置默认探索率（默认 0，保持兼容），
+# 离线数据生成等场景可显式传参打开 ε-贪婪以提升动作覆盖度。
+DEFAULT_EXPLORATION_RATE = float(os.getenv("RULE_POLICY_EPS", "0.0"))
 
 # 规则1：如果市场波动率（VIX）非常高，就采取“保守”的动作（比如，把大部分资产换成现金）。
 # 规则2：如果用户的风险偏好是“进取型”，并且近期市场回报率为正，就采取“进取”的动作（比如，增加股票配置）。
@@ -26,8 +30,12 @@ HIGH_VOLATILITY_THRESHOLD = 0.20
 def policy_based_rule(
     state_vec: np.ndarray,
     allowed_cards: List[ActCard], # 已根据用户风险等级过滤的 `ActCard` 列表
-    user_risk_bucket: int
-):
+    user_risk_bucket: int,
+    *,
+    exploration_rate: Optional[float] = None,
+    rng: Optional[np.random.Generator] = None,
+    return_propensity: bool = False,
+) -> Union[Tuple[int, ActCard], Tuple[int, ActCard, float]]:
     """
     一个基于规则的策略，用于生成baseline行为并用于回测比较。
     这个策略也作为“行为策略”，用于生成离线数据集。
@@ -48,5 +56,19 @@ def policy_based_rule(
         # 合规术语：“在稳定的市场环境中，我们旨在通过选择与客户风险承受能力上限
         # 一致的配置来捕捉增长机会。”
         chosen_card = max(allowed_cards, key=lambda card: card.risk_level)
-    
+
+    eps = DEFAULT_EXPLORATION_RATE if exploration_rate is None else max(0.0, min(1.0, exploration_rate))
+    propensity = 1.0
+    if eps > 0.0 and len(allowed_cards) > 1:
+        rng = rng or np.random.default_rng()
+        n_cards = len(allowed_cards)
+        probs = np.full(n_cards, eps / n_cards, dtype=np.float32)
+        greedy_idx = allowed_cards.index(chosen_card)
+        probs[greedy_idx] += 1.0 - eps
+        sampled_idx = int(rng.choice(n_cards, p=probs))
+        chosen_card = allowed_cards[sampled_idx]
+        propensity = float(probs[sampled_idx])
+
+    if return_propensity:
+        return chosen_card.act_id, chosen_card, propensity
     return chosen_card.act_id, chosen_card
