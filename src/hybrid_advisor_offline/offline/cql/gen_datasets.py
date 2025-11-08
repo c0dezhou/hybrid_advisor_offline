@@ -4,6 +4,8 @@ import io
 import os
 import sys
 import time
+import shutil
+import tempfile
 import subprocess
 import numpy as np
 import pandas as pd
@@ -43,15 +45,16 @@ OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
 # N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
 # N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
-N_USERS_TO_SIMULATE = 10000  # 用于模拟的用户数量,生成10000条轨迹
+# N_USERS_TO_SIMULATE = 10000  # 用于模拟的用户数量,生成10000条轨迹
+N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
 EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
-POLICY_EPS_START = float(os.getenv("POLICY_EPS_START", "0.4"))  # 初始 ε，鼓励探索
-POLICY_EPS_MIN = float(os.getenv("POLICY_EPS_MIN", "0.1"))     # 探索下限，避免完全贪婪
-POLICY_EPS_DECAY = float(os.getenv("POLICY_EPS_DECAY", "0.995"))  # 每个 episode 后衰减
+POLICY_EPS_FIXED = float(os.getenv("POLICY_EPSILON", "0.2"))  # 固定 ε 值，让 20% 的时间随机动作
 POLICY_SEED = 42
 
+FILTER_LOW_RETURN = os.getenv("FILTER_LOW_RETURN", "0") == "1"
 DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
-DATASET_MIN_RETURN = float(os.getenv("DATASET_MIN_RETURN", "0.0"))  # 过滤低回报轨迹的阈值
+_min_return_env = os.getenv("DATASET_MIN_RETURN", "").strip()
+DATASET_MIN_RETURN = float(_min_return_env) if _min_return_env else None  # 默认不过滤
 
 
 def _behavior_meta_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
@@ -192,41 +195,45 @@ def generate_offline_dataset():
         print("请确保您已成功download 市场数据，用户数据 和 train_user_model。")
         return
 
-    # 3. 准备列表以存储所有转换
-    obss, acts, rwds, dones = [], [], [], []
-    propensities: list[float] = []
-    episode_ids: list[int] = []
-    ep_returns: list[float] = []
+    total_users = len(sampled_users_df)
+    max_steps = total_users * EPISODE_MAX_STEPS
+    if max_steps <= 0:
+        print("没有可生成的用户或步数，直接返回。")
+        return
+
+    tmp_memmap_dir = tempfile.mkdtemp(prefix="offline_dataset_memmap_")
+    memmap_handles: list[np.memmap] = []
+
+    def _alloc_memmap(name: str, shape, dtype):
+        path = os.path.join(tmp_memmap_dir, f"{name}.dat")
+        mmap = np.memmap(path, dtype=dtype, mode="w+", shape=shape)
+        memmap_handles.append(mmap)
+        return mmap
+
+    obss_mem = _alloc_memmap("obs", (max_steps, obs_dim), np.float32)
+    acts_mem = _alloc_memmap("acts", (max_steps,), np.int64)
+    rwds_mem = _alloc_memmap("rews", (max_steps,), np.float32)
+    dones_mem = _alloc_memmap("dones", (max_steps,), np.float32)
+    prop_mem = _alloc_memmap("props", (max_steps,), np.float32)
+    episode_ids_mem = _alloc_memmap("episode_ids", (max_steps,), np.int32)
+
     rng = np.random.default_rng(POLICY_SEED)
     episode_counter = 0
+    ep_returns: list[float] = []
+    cursor = 0
 
-    # 为了解决生成500个轨迹速度慢的问题，
-    # 每个用户只在进入循环前调用一次 get_accept_prob(user_profile)，
-    # 并把结果随手缓存成变量 user_accept_prob；同理，allowed_cards_for_user 也在外层调用一次，
-    # 而不是每个时间步都重新筛卡。
-    # 循环内部就只做状态拼接、环境步进和一次 compute_reward(..., accept_prob=user_accept_prob)，
-    # 省掉了大量重复的 predict_proba 和卡片筛选
     print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
     for _, user_row in tqdm(sampled_users_df.iterrows(), total=len(sampled_users_df)):
-        # 为当前用户创建一个经过清理的 UserProfile 对象
         user_profile = user_row_to_profile(user_row)
         user_vector = make_up_to_vec(user_profile)
         user_accept_prob = get_accept_prob(user_profile)
         allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
 
-        # 计算当前 episode 的 ε 值：指数衰减 + 下限，避免后期完全失去探索
-        episode_eps = max(
-            POLICY_EPS_MIN,
-            POLICY_EPS_START * (POLICY_EPS_DECAY ** episode_counter),
-        )
-
-        # 为每个新用户重置环境
         info = env.reset()
         ep_return = 0.0
 
         done = False
         while not done:
-            # a. 构建当前状态
             state_vec = build_state_vec(
                 mkt_features=info['mkt_sshot'],
                 user_profile=user_profile,
@@ -234,21 +241,17 @@ def generate_offline_dataset():
                 user_vector=user_vector
             )
 
-            # b. 获取允许的动作，并使用基于规则的策略选择一个
             action_id, _, propensity = policy_based_rule(
                 state_vec,
                 allowed_cards,
                 user_profile.risk_bucket,
-                exploration_rate=episode_eps,
+                exploration_rate=POLICY_EPS_FIXED,
                 rng=rng,
                 return_propensity=True,
             )
 
-            # c. 步进环境
             market_return, done, next_info = env.step(action_id)
 
-            # d. 计算奖励
-            # 为简单起见，在数据集生成阶段我们将忽略回撤
             reward = compute_reward(
                 market_return,
                 user_profile,
@@ -257,34 +260,39 @@ def generate_offline_dataset():
             )
             ep_return += reward
 
-            # e. 存储转换
-            obss.append(state_vec)
-            acts.append(action_id)
-            rwds.append(reward)
-            dones.append(done)
-            propensities.append(float(propensity))
-            episode_ids.append(episode_counter)
+            if cursor >= max_steps:
+                raise RuntimeError(
+                    "预估的 max_steps 太小，写入越界。请调整 EPISODE_MAX_STEPS 或减少用户数量。"
+                )
+            obss_mem[cursor] = state_vec
+            acts_mem[cursor] = action_id
+            rwds_mem[cursor] = reward
+            dones_mem[cursor] = 1.0 if done else 0.0
+            prop_mem[cursor] = float(propensity)
+            episode_ids_mem[cursor] = episode_counter
+            cursor += 1
 
-            # 更新循环所使用的环境信息
             info = next_info
 
         episode_counter += 1
         ep_returns.append(ep_return)
 
-    print(f"\n总共生成了 {len(obss)} 个转换。")
+    print(f"\n总共生成了 {cursor} 个转换。")
 
     # 3.1 轨迹质量过滤（可选）
     def _filter_by_returns(e_returns, keep_frac, min_return):
+        if not FILTER_LOW_RETURN:
+            return None
         keep_frac = max(0.0, min(1.0, keep_frac))
-        min_return = float(min_return)
-        if keep_frac >= 0.999 and min_return <= -1e9:
+        min_return = None if min_return is None else float(min_return)
+        if keep_frac >= 0.999 and (min_return is None):
             return None
         sorted_eps = sorted(enumerate(e_returns), key=lambda kv: kv[1], reverse=True)
         if not sorted_eps:
             return None
         keep_count = max(1, int(len(sorted_eps) * keep_frac))
         keep_ids = {ep_id for ep_id, _ in sorted_eps[:keep_count]}
-        if min_return > -1e9:
+        if min_return is not None:
             for ep_id, total in sorted_eps:
                 if total >= min_return:
                     keep_ids.add(ep_id)
@@ -292,15 +300,16 @@ def generate_offline_dataset():
             return None
         return keep_ids
 
-    keep_episode_ids = _filter_by_returns(ep_returns, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN if DATASET_MIN_RETURN is not None else -1e9)
+    keep_episode_ids = _filter_by_returns(ep_returns, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN)
 
     # 4. 创建并保存 d3rlpy MDPDataset
-    obss_array = np.asarray(obss, dtype=np.float32)
-    acts_array = np.asarray(acts, dtype=np.int64)
-    rwds_array = np.asarray(rwds, dtype=np.float32)
-    dones_array = np.asarray(dones, dtype=np.float32)
-    prop_array = np.asarray(propensities, dtype=np.float32)
-    episode_ids_array = np.asarray(episode_ids, dtype=np.int32)
+    used_slice = slice(0, cursor)
+    obss_array = obss_mem[used_slice]
+    acts_array = acts_mem[used_slice]
+    rwds_array = rwds_mem[used_slice]
+    dones_array = dones_mem[used_slice]
+    prop_array = prop_mem[used_slice]
+    episode_ids_array = episode_ids_mem[used_slice]
 
     if keep_episode_ids:
         mask = np.isin(episode_ids_array, list(keep_episode_ids))
@@ -331,6 +340,7 @@ def generate_offline_dataset():
         actions=acts_array,
         episode_ids=episode_ids_array,
         terminals=dones_array,
+        epsilon=np.array([POLICY_EPS_FIXED], dtype=np.float32),
     )
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
 
@@ -353,6 +363,29 @@ def _parse_args():
         "--extra-eval-args",
         nargs=argparse.REMAINDER,
         help="传递给评估脚本的附加参数（放在 --extra-eval-args 之后）。",
+    )
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=None,
+        help=f"rule-based 行为策略的 ε 探索率（默认 {POLICY_EPS_FIXED}）。",
+    )
+    parser.add_argument(
+        "--filter-low-return",
+        action="store_true",
+        help="启用低回报轨迹过滤（默认关闭，调试用）。",
+    )
+    parser.add_argument(
+        "--top-frac",
+        type=float,
+        default=None,
+        help="当启用过滤时，保留回报 Top 百分比（默认读取环境变量 DATASET_KEEP_TOP_FRAC）。",
+    )
+    parser.add_argument(
+        "--min-return",
+        type=float,
+        default=None,
+        help="当启用过滤时，保留回报>=该阈值的 episode（默认读取 DATASET_MIN_RETURN）。",
     )
     return parser.parse_args()
 
@@ -377,6 +410,21 @@ def _run_evaluation(model_path: str, extra_args: list[str] | None = None) -> Non
 def main():
     args = _parse_args()
 
+    global POLICY_EPS_FIXED, FILTER_LOW_RETURN, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN
+    if args.epsilon is not None:
+        POLICY_EPS_FIXED = max(0.0, min(1.0, args.epsilon))
+        print(f"使用自定义 ε 探索率: {POLICY_EPS_FIXED}")
+    if args.filter_low_return:
+        FILTER_LOW_RETURN = True
+        if args.top_frac is not None:
+            DATASET_KEEP_TOP_FRAC = args.top_frac
+        if args.min_return is not None:
+            DATASET_MIN_RETURN = args.min_return
+        print(
+            f"已启用轨迹过滤：top_frac={DATASET_KEEP_TOP_FRAC}, "
+            f"min_return={DATASET_MIN_RETURN}"
+        )
+
     # download_mkt_data()
     generate_offline_dataset()
     print("\n离线数据集生成过程完成。")
@@ -389,9 +437,7 @@ if __name__ == "__main__":
     main()
 
 # USE_CARD_FACTORY=1 \
-# POLICY_EPS_START=0.6 \
-# POLICY_EPS_MIN=0.2 \
-# POLICY_EPS_DECAY=0.997 \
+# POLICY_EPSILON=0.4 \
 # DATASET_KEEP_TOP_FRAC=0.7 \
 # DATASET_MIN_RETURN=10 \
 # python -m hybrid_advisor_offline.offline.cql.gen_datasets

@@ -6,9 +6,26 @@ from hybrid_advisor_offline.engine.state.state_builder import UserProfile
 
 USER_MODEL_PATH = "./models/user_model.pkl"
 
-W_MKT_RETURN = 1.0  # 市场回报权重
-W_USER_ACCEPT = 0.5    # 用户接受度权重
-W_DRAWDOWN_PENALTY = 0.2 # 最大回撤惩罚权重
+
+def _get_weight(name: str, default: float) -> float:
+    val = os.getenv(name)
+    try:
+        return float(val) if val is not None else default
+    except ValueError:
+        print(f"[reward_architect] 环境变量 {name}={val} 非法，回退到默认 {default}")
+        return default
+
+
+W_MKT_RETURN = _get_weight("W_MKT_RETURN", 1.0)  # 市场回报权重
+W_USER_ACCEPT = _get_weight("W_USER_ACCEPT", 0.0)    # 默认关闭用户接受度权重
+W_DRAWDOWN_PENALTY = _get_weight("W_DRAWDOWN_PENALTY", 0.2) # 最大回撤惩罚权重
+
+print(
+    f"[reward_architect] 当前 reward 权重: "
+    f"W_MKT_RETURN={W_MKT_RETURN}, "
+    f"W_USER_ACCEPT={W_USER_ACCEPT}, "
+    f"W_DRAWDOWN_PENALTY={W_DRAWDOWN_PENALTY}"
+)
 
 try:
     _user_model_pipeline = joblib.load(USER_MODEL_PATH)

@@ -1,15 +1,17 @@
 # 加载已训练的 CQL 策略，并复用训练时的 scaler。
 import json
-import os,sys
+import os
+import sys
 from typing import Optional, Tuple
 
 import numpy as np
 
-from d3rlpy.algos import DiscreteCQL, DiscreteCQLConfig
+from d3rlpy.algos import DiscreteBCConfig, DiscreteCQL, DiscreteCQLConfig
 from d3rlpy.constants import ActionSpace
 from d3rlpy.dataset import MDPDataset, ReplayBuffer
 from d3rlpy.preprocessing.observation_scalers import StandardObservationScaler
 from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
+from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 
 
 def build_scalers(
@@ -81,7 +83,7 @@ def load_trained_policy(
     replay_buffer: ReplayBuffer,
     require_gpu: bool = False,
     action_size: Optional[int] = None,
-) -> DiscreteCQL:
+):
     """
     加载已训练好的离散 CQL 策略，并复用与训练阶段一致的 scaler。
     """
@@ -90,19 +92,30 @@ def load_trained_policy(
             f"未找到已训练的策略模型：{model_path}"
         )
 
-    train_cfg = _load_training_config(model_path)
-    use_reward_scaler = train_cfg.get("use_reward_scaler", True)
+    train_cfg = load_training_config(model_path)
+    reward_scale = train_cfg.get("reward_scale", 1.0)
+    apply_reward_scale(replay_buffer, reward_scale)
+    model_type = train_cfg.get("model_type", "CQL").upper()
+    use_reward_scaler = train_cfg.get("use_reward_scaler", model_type != "BC")
     obs_scaler, rew_scaler = build_scalers(replay_buffer, use_reward_scaler=use_reward_scaler)
 
-    config = DiscreteCQLConfig(
-        observation_scaler=obs_scaler,
-        reward_scaler=rew_scaler,
-        alpha=train_cfg.get("alpha", 1.0),
-        learning_rate=train_cfg.get("learning_rate", 3e-4),
-        n_critics=train_cfg.get("n_critics", 1),
-        target_update_interval=train_cfg.get("target_update_interval", 8000),
-    )
     device = 0 if require_gpu else False
+
+    if model_type == "BC":
+        config = DiscreteBCConfig(
+            observation_scaler=obs_scaler,
+            learning_rate=train_cfg.get("learning_rate", 1e-4),
+            batch_size=train_cfg.get("batch_size", 256),
+        )
+    else:
+        config = DiscreteCQLConfig(
+            observation_scaler=obs_scaler,
+            reward_scaler=rew_scaler,
+            alpha=train_cfg.get("alpha", 1.0),
+            learning_rate=train_cfg.get("learning_rate", 3e-4),
+            n_critics=train_cfg.get("n_critics", 1),
+            target_update_interval=train_cfg.get("target_update_interval", 8000),
+        )
     policy = config.create(device=device)
 
     if not replay_buffer.episodes:
@@ -130,13 +143,19 @@ def load_trained_policy(
     policy.build_with_dataset(dataset_for_build)
     policy.load_model(model_path)
     return policy
-def _load_training_config(model_path: str) -> dict:
-    cfg_path = f"{model_path}.config.json"
-    if not os.path.exists(cfg_path):
-        return {}
-    try:
-        with open(cfg_path, "r", encoding="utf-8") as cfg_file:
-            return json.load(cfg_file)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"警告：读取模型配置 {cfg_path} 失败：{exc}", file=sys.stderr)
-        return {}
+def load_training_config(model_path: str) -> dict:
+    candidates = [f"{model_path}.config.json"]
+    legacy = model_path.replace(".pt", ".config.json")
+    if legacy not in candidates:
+        candidates.append(legacy)
+
+    for cfg_path in candidates:
+        if not os.path.exists(cfg_path):
+            continue
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as cfg_file:
+                return json.load(cfg_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"警告：读取模型配置 {cfg_path} 失败：{exc}", file=sys.stderr)
+            return {}
+    return {}

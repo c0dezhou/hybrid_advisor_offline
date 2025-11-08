@@ -20,7 +20,10 @@ from hybrid_advisor_offline.offline.eval.fqe_data import (
 )
 from hybrid_advisor_offline.offline.eval.cpe_metrics import compute_cpe_report
 from hybrid_advisor_offline.offline.eval.fqe_runner import run_fqe
-from hybrid_advisor_offline.offline.eval.policy_loader import load_trained_policy
+from hybrid_advisor_offline.offline.eval.policy_loader import (
+    load_trained_policy,
+    load_training_config,
+)
 
 try:
     from hybrid_advisor_offline.offline.cql.train_discrete import _require_gpu
@@ -106,7 +109,10 @@ def main() -> None:
     if args.require_gpu:
         _require_gpu()
 
-    replay_buffer = load_replay_buffer(args.dataset)
+    train_cfg = load_training_config(args.model)
+    reward_scale = train_cfg.get("reward_scale", 1.0)
+
+    replay_buffer = load_replay_buffer(args.dataset, reward_scale=reward_scale)
     policy = load_trained_policy(
         args.model,
         replay_buffer,

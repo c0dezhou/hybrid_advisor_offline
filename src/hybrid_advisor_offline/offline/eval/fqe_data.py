@@ -7,10 +7,11 @@ import numpy as np
 from d3rlpy.constants import ActionSpace
 from d3rlpy.dataset import MDPDataset, ReplayBuffer
 from d3rlpy.dataset.buffers import InfiniteBuffer
+from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 
 DATASET_PATH_DEFAULT = "./data/offline_dataset.h5"
 
-def load_replay_buffer(path: str = DATASET_PATH_DEFAULT) -> ReplayBuffer:
+def load_replay_buffer(path: str = DATASET_PATH_DEFAULT, reward_scale: float = 1.0) -> ReplayBuffer:
     """
     加载存储市场轨迹的离线 ReplayBuffer。
     """
@@ -18,7 +19,9 @@ def load_replay_buffer(path: str = DATASET_PATH_DEFAULT) -> ReplayBuffer:
         raise FileNotFoundError(
             f"未找到离线数据集 {path}，请先运行数据生成脚本。"
         )
-    return ReplayBuffer.load(path, buffer=InfiniteBuffer())
+    buffer = ReplayBuffer.load(path, buffer=InfiniteBuffer())
+    apply_reward_scale(buffer, reward_scale)
+    return buffer
 
 
 def _episodes_to_arrays(episodes: Sequence) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:

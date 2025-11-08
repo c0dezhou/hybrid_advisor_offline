@@ -9,17 +9,19 @@ from d3rlpy.logging import FileAdapterFactory
 from sklearn.model_selection import train_test_split
 
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
+from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 
 DATASET_PATH = "./data/offline_dataset.h5"
 MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
 MODEL_CONFIG_PATH = f"{MODEL_SAVE_PATH}.config.json"
 N_STEPS = 500000  # 训练步数
 N_STEPS_PER_EPOCH = int(os.getenv("CQL_STEPS_PER_EPOCH", "5000"))
-# 默认让 CQL 更加“大胆”：降低 alpha，减小学习率以避免不稳定
-ALPHA = float(os.getenv("CQL_ALPHA", "0.01"))
-LEARNING_RATE = float(os.getenv("CQL_LR", "2e-4"))
+# 让 CQL 保守项更有力度，避免过度发散
+ALPHA = float(os.getenv("CQL_ALPHA", "1.0"))
+LEARNING_RATE = float(os.getenv("CQL_LR", "1e-4"))
 N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
-TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "8000"))
+TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "10000"))
+REWARD_SCALE = float(os.getenv("CQL_REWARD_SCALE", "1000.0"))
 USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
@@ -70,6 +72,7 @@ def tarin_discrete_cql(require_gpu: bool):
             f"未找到离线数据集：{DATASET_PATH}，请 gen offline dataset"
         )
     dataset = ReplayBuffer.load(DATASET_PATH, buffer=InfiniteBuffer())
+    apply_reward_scale(dataset, REWARD_SCALE)
     obs_stand, rew_stand = _standard_dataset(dataset)
 
     episo = list(dataset.episodes)
@@ -95,7 +98,8 @@ def tarin_discrete_cql(require_gpu: bool):
     print(
         f"{dataset.size()} 条轨迹上训练 DiscreteCQL，共 {N_STEPS} 步 "
         f"(alpha={ALPHA}, lr={LEARNING_RATE}, n_critics={N_CRITICS}, "
-        f"steps/epoch={N_STEPS_PER_EPOCH}, reward_scaler={'on' if USE_REWARD_SCALER else 'off'})"
+        f"steps/epoch={N_STEPS_PER_EPOCH}, reward_scale={REWARD_SCALE}, "
+        f"reward_scaler={'on' if USE_REWARD_SCALER else 'off'})"
     )
     cql.fit(
         train_buff,
@@ -114,6 +118,7 @@ def tarin_discrete_cql(require_gpu: bool):
         "n_critics": N_CRITICS,
         "target_update_interval": TARGET_UPDATE_INTERVAL,
         "n_steps_per_epoch": N_STEPS_PER_EPOCH,
+        "reward_scale": REWARD_SCALE,
         "use_reward_scaler": USE_REWARD_SCALER,
     }
     try:
@@ -207,6 +212,12 @@ def _parse_args():
         help=f"Target 网络更新步间隔（默认 {TARGET_UPDATE_INTERVAL}）。",
     )
     parser.add_argument(
+        "--reward-scale",
+        type=float,
+        default=None,
+        help=f"线性奖励缩放因子（默认 {REWARD_SCALE}，仅用于数值尺度调整）。",
+    )
+    parser.add_argument(
         "--no-reward-scaler",
         action="store_true",
         help="禁用 reward scaler，直接使用原始奖励值。",
@@ -217,7 +228,7 @@ def _parse_args():
 def main():
     args = _parse_args()
 
-    global N_STEPS, N_STEPS_PER_EPOCH, ALPHA, LEARNING_RATE, N_CRITICS, TARGET_UPDATE_INTERVAL, USE_REWARD_SCALER
+    global N_STEPS, N_STEPS_PER_EPOCH, ALPHA, LEARNING_RATE, N_CRITICS, TARGET_UPDATE_INTERVAL, REWARD_SCALE, USE_REWARD_SCALER
     if args.steps is not None:
         N_STEPS = args.steps
         print(f"使用自定义训练步数 N_STEPS={N_STEPS}")
@@ -241,6 +252,10 @@ def main():
         global TARGET_UPDATE_INTERVAL
         TARGET_UPDATE_INTERVAL = args.target_update_interval
         print(f"使用自定义 target_update_interval={TARGET_UPDATE_INTERVAL}")
+    if args.reward_scale is not None:
+        global REWARD_SCALE
+        REWARD_SCALE = args.reward_scale
+        print(f"使用自定义 reward_scale={REWARD_SCALE}")
     if args.no_reward_scaler:
         global USE_REWARD_SCALER
         USE_REWARD_SCALER = False
@@ -269,3 +284,22 @@ Epoch 11/100: 100%|████████████████| 8000/8000 [
 Epoch 12/100:   8%|█▎               | 641/8000 [00:06<01:19, 92.48it/s, loss=2.18, td_loss=2.03, conservative_loss=2.91]
 Epoch 12/100:   8%|█▎               | 644/8000 [00:06<01:19, 92.36it/s, loss=2.18, td_loss=2.03, conservative_loss=2.91]
 """
+
+'''
+Epoch 121/125: 100%|█████████████| 4000/4000 [00:27<00:00, 143.94it/s, loss=1.57, td_loss=0.553, conservative_loss=2.04]
+2025-11-08 00:25.31 [info     ] DiscreteCQL_20251107233016: epoch=121 step=484000 epoch=121 metrics={'time_sample_batch': 0.00031269842386245727, 'time_algorithm_update': 0.006580351293087006, 'loss': 1.5721703634709119, 'td_loss': 0.5531739114327356, 'conservative_loss': 2.0379929024875163, 'time_step': 0.006933498799800873} step=484000
+2025-11-08 00:25.31 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107233016/model_484000.d3
+Epoch 122/125: 100%|█████████████| 4000/4000 [00:27<00:00, 143.13it/s, loss=1.56, td_loss=0.539, conservative_loss=2.04]
+2025-11-08 00:25.59 [info     ] DiscreteCQL_20251107233016: epoch=122 step=488000 epoch=122 metrics={'time_sample_batch': 0.00031115037202835083, 'time_algorithm_update': 0.006620987474918365, 'loss': 1.5568970621228218, 'td_loss': 0.5388969832137227, 'conservative_loss': 2.0360001583099363, 'time_step': 0.006972845077514648} step=488000
+2025-11-08 00:25.59 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107233016/model_488000.d3
+Epoch 123/125: 100%|██████████████| 4000/4000 [00:28<00:00, 141.16it/s, loss=1.58, td_loss=0.56, conservative_loss=2.03]
+2025-11-08 00:26.27 [info     ] DiscreteCQL_20251107233016: epoch=123 step=492000 epoch=123 metrics={'time_sample_batch': 0.0003172858953475952, 'time_algorithm_update': 0.006711183845996857, 'loss': 1.577385852649808, 'td_loss': 0.5603939840868115, 'conservative_loss': 2.0339837372899057, 'time_step': 0.0070697165131568904} step=492000
+2025-11-08 00:26.27 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107233016/model_492000.d3
+Epoch 124/125: 100%|█████████████| 4000/4000 [00:27<00:00, 144.84it/s, loss=1.54, td_loss=0.518, conservative_loss=2.04]
+2025-11-08 00:26.55 [info     ] DiscreteCQL_20251107233016: epoch=124 step=496000 epoch=124 metrics={'time_sample_batch': 0.0003393761515617371, 'time_algorithm_update': 0.006504083037376404, 'loss': 1.5390516556799412, 'td_loss': 0.518163040023297, 'conservative_loss': 2.0417772286832334, 'time_step': 0.006888557732105255} step=496000
+2025-11-08 00:26.55 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107233016/model_496000.d3
+Epoch 125/125: 100%|█████████████| 4000/4000 [00:28<00:00, 142.60it/s, loss=1.57, td_loss=0.546, conservative_loss=2.05]
+2025-11-08 00:27.23 [info     ] DiscreteCQL_20251107233016: epoch=125 step=500000 epoch=125 metrics={'time_sample_batch': 0.0003377593159675598, 'time_algorithm_update': 0.0066143438816070555, 'loss': 1.5701144953221082, 'td_loss': 0.5452247457895428, 'conservative_loss': 2.0497795009613036, 'time_step': 0.00699659126996994} step=500000
+2025-11-08 00:27.23 [info     ] Model parameters are saved to d3rlpy_logs/cql/DiscreteCQL_20251107233016/model_500000.d3
+训练配置已保存至 ./models/cql_discrete_model.pt.config.json
+'''
