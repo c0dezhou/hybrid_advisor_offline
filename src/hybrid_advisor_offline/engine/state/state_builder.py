@@ -8,7 +8,7 @@ import pandas as pd
 from dataclasses import dataclass, fields, MISSING
 from typing import Union, Optional
 
-from hybrid_advisor_offline.offline.cql.train_usr_model import get_model_features
+from hybrid_advisor_offline.offline.trainrl.train_usr_model import get_model_features
 
 USER_MODEL_PATH = "./models/user_model.pkl"
 INCLUDE_USER_IN_STATE = int(os.environ.get("INCLUDE_USER_IN_STATE", "1")) == 1

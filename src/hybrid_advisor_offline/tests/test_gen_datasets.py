@@ -1,5 +1,5 @@
 import os
-from hybrid_advisor_offline.offline.cql.gen_datasets import DATA_DIR,download_mkt_data,download_user_data
+from hybrid_advisor_offline.offline.trainrl.gen_datasets import DATA_DIR,download_mkt_data,download_user_data
 
 def test_gen_datasets():
     """构造数据集"""

@@ -26,7 +26,7 @@ from hybrid_advisor_offline.offline.eval.policy_loader import (
 )
 
 try:
-    from hybrid_advisor_offline.offline.cql.train_discrete import _require_gpu
+    from hybrid_advisor_offline.offline.trainrl.train_discrete import _require_gpu
 except ImportError:  # pragma: no cover
     def _require_gpu() -> None:
         raise RuntimeError("GPU 校验函数缺失，请确认 train_discrete 模块可用。")

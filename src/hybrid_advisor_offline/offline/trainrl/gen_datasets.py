@@ -7,6 +7,7 @@ import time
 import shutil
 import tempfile
 import subprocess
+from dataclasses import asdict
 import numpy as np
 import pandas as pd
 import requests
@@ -45,8 +46,8 @@ OUTPUT_DATASET_PATH = os.environ.get("OUTPUT_DATASET_PATH", "./data/offline_data
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
 # N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
 # N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
-N_USERS_TO_SIMULATE = 20000  # 用于模拟的用户数量,生成10000条轨迹
-# N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
+# N_USERS_TO_SIMULATE = 20000  # 用于模拟的用户数量,生成10000条轨迹
+N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
 EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
 POLICY_EPS_FIXED = float(os.getenv("POLICY_EPSILON", "0.2"))  # 固定 ε 值，让 20% 的时间随机动作
 POLICY_SEED = 42
@@ -55,6 +56,11 @@ FILTER_LOW_RETURN = os.getenv("FILTER_LOW_RETURN", "0") == "1"
 DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
 _min_return_env = os.getenv("DATASET_MIN_RETURN", "").strip()
 DATASET_MIN_RETURN = float(_min_return_env) if _min_return_env else None  # 默认不过滤
+
+
+def _profile_to_meta(profile: UserProfile) -> dict:
+    """将 UserProfile 转换为纯 dict，方便写入 npz。"""
+    return asdict(profile)
 
 
 def _behavior_meta_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
@@ -221,6 +227,7 @@ def generate_offline_dataset():
     rng = np.random.default_rng(POLICY_SEED)
     ep_id_counter = 0
     ep_return_bucket: list[float] = []
+    episode_profiles: list[dict] = []
     row_ptr = 0
 
     print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
@@ -276,6 +283,7 @@ def generate_offline_dataset():
 
             info = next_info
 
+        episode_profiles.append(_profile_to_meta(user_profile))
         ep_id_counter += 1
         ep_return_bucket.append(ep_return)
 
@@ -344,6 +352,7 @@ def generate_offline_dataset():
         episode_ids=episode_ids_array,
         terminals=dones_array,
         epsilon=np.array([POLICY_EPS_FIXED], dtype=np.float32),
+        user_profiles=np.array(episode_profiles, dtype=object),
     )
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
 
@@ -443,4 +452,4 @@ if __name__ == "__main__":
 # POLICY_EPSILON=0.4 \
 # DATASET_KEEP_TOP_FRAC=0.7 \
 # DATASET_MIN_RETURN=10 \
-# python -m hybrid_advisor_offline.offline.cql.gen_datasets
+# python -m hybrid_advisor_offline.offline.trainrl.gen_datasets

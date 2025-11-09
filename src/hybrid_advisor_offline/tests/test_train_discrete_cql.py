@@ -4,7 +4,7 @@ import types
 
 import pytest
 
-from hybrid_advisor_offline.offline.cql import train_discrete
+from hybrid_advisor_offline.offline.trainrl import train_discrete
 
 
 def test_require_gpu_import_missing(monkeypatch):
