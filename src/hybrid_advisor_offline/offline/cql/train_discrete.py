@@ -11,9 +11,14 @@ from sklearn.model_selection import train_test_split
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
 from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 
-DATASET_PATH = "./data/offline_dataset.h5"
-MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
-MODEL_CONFIG_PATH = f"{MODEL_SAVE_PATH}.config.json"
+DEFAULT_DATASET_PATH = "./data/offline_dataset.h5"
+DEFAULT_MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
+DATASET_PATH = DEFAULT_DATASET_PATH
+MODEL_SAVE_PATH = DEFAULT_MODEL_SAVE_PATH
+
+
+def _model_config_path() -> str:
+    return f"{MODEL_SAVE_PATH}.config.json"
 N_STEPS = 500000  # 训练步数
 N_STEPS_PER_EPOCH = int(os.getenv("CQL_STEPS_PER_EPOCH", "5000"))
 # 让 CQL 保守项更有力度，避免过度发散
@@ -109,8 +114,8 @@ def tarin_discrete_cql(require_gpu: bool):
         show_progress=True,
     )
 
-    if not os.path.exists("./models"):
-        os.makedirs("./models")
+    model_dir = os.path.dirname(MODEL_SAVE_PATH) or "."
+    os.makedirs(model_dir, exist_ok=True)
     cql.save_model(MODEL_SAVE_PATH)
     config_payload = {
         "alpha": ALPHA,
@@ -124,12 +129,15 @@ def tarin_discrete_cql(require_gpu: bool):
     try:
         import json
 
-        with open(MODEL_CONFIG_PATH, "w", encoding="utf-8") as cfg_file:
+        cfg_path = _model_config_path()
+        cfg_dir = os.path.dirname(cfg_path) or "."
+        os.makedirs(cfg_dir, exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as cfg_file:
             json.dump(config_payload, cfg_file, ensure_ascii=False, indent=2)
     except OSError as exc:
-        print(f"警告：写入模型配置 {MODEL_CONFIG_PATH} 失败：{exc}", file=sys.stderr)
+        print(f"警告：写入模型配置 {cfg_path} 失败：{exc}", file=sys.stderr)
     else:
-        print(f"训练配置已保存至 {MODEL_CONFIG_PATH}")
+        print(f"训练配置已保存至 {cfg_path}")
     print(f"\n训练完成，模型已保存至 {MODEL_SAVE_PATH}")
 
 def load_cql_policy(require_gpu: bool = True) -> DiscreteCQL:
@@ -169,6 +177,18 @@ def _parse_args():
 
     parser = argparse.ArgumentParser(
         description="使用离线数据集训练离散 Conservative Q-Learning 模型。",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help=f"离线数据集路径（默认 {DEFAULT_DATASET_PATH}）。",
+    )
+    parser.add_argument(
+        "--model-output",
+        type=str,
+        default=None,
+        help=f"模型保存路径（默认 {DEFAULT_MODEL_SAVE_PATH}）。config 跟随 .pt 生成。",
     )
     parser.add_argument(
         "--require-gpu",
@@ -227,6 +247,14 @@ def _parse_args():
 
 def main():
     args = _parse_args()
+
+    global DATASET_PATH, MODEL_SAVE_PATH
+    if args.dataset:
+        DATASET_PATH = args.dataset
+        print(f"使用自定义 dataset: {DATASET_PATH}")
+    if args.model_output:
+        MODEL_SAVE_PATH = args.model_output
+        print(f"使用自定义模型路径: {MODEL_SAVE_PATH}")
 
     global N_STEPS, N_STEPS_PER_EPOCH, ALPHA, LEARNING_RATE, N_CRITICS, TARGET_UPDATE_INTERVAL, REWARD_SCALE, USE_REWARD_SCALER
     if args.steps is not None:
