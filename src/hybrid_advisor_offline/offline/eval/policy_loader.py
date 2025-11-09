@@ -6,7 +6,12 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from d3rlpy.algos import DiscreteBCConfig, DiscreteCQL, DiscreteCQLConfig
+from d3rlpy.algos import (
+    DiscreteBCConfig,
+    DiscreteBCQConfig,
+    DiscreteCQL,
+    DiscreteCQLConfig,
+)
 from d3rlpy.constants import ActionSpace
 from d3rlpy.dataset import MDPDataset, ReplayBuffer
 from d3rlpy.preprocessing.observation_scalers import StandardObservationScaler
@@ -95,17 +100,28 @@ def load_trained_policy(
     train_cfg = load_training_config(model_path)
     reward_scale = train_cfg.get("reward_scale", 1.0)
     apply_reward_scale(replay_buffer, reward_scale)
-    model_type = train_cfg.get("model_type", "CQL").upper()
-    use_reward_scaler = train_cfg.get("use_reward_scaler", model_type != "BC")
+    model_type = train_cfg.get("model_type") or train_cfg.get("algo_name") or "CQL"
+    model_type_upper = str(model_type).upper()
+    bc_like = model_type_upper in {"BC", "DISCRETEBC"}
+    use_reward_scaler = train_cfg.get("use_reward_scaler", not bc_like)
     obs_scaler, rew_scaler = build_scalers(replay_buffer, use_reward_scaler=use_reward_scaler)
 
     device = 0 if require_gpu else False
 
-    if model_type == "BC":
+    if model_type_upper in {"BC", "DISCRETEBC"}:
         config = DiscreteBCConfig(
             observation_scaler=obs_scaler,
             learning_rate=train_cfg.get("learning_rate", 1e-4),
             batch_size=train_cfg.get("batch_size", 256),
+        )
+    elif model_type_upper in {"DISCRETEBCQ", "BCQ"}:
+        # BCQ 实验管线：保持与训练时一致的学习率/批大小/奖励缩放。
+        config = DiscreteBCQConfig(
+            observation_scaler=obs_scaler,
+            reward_scaler=rew_scaler,
+            learning_rate=train_cfg.get("learning_rate", 1e-4),
+            batch_size=train_cfg.get("batch_size", 256),
+            gamma=train_cfg.get("gamma", 0.99),
         )
     else:
         config = DiscreteCQLConfig(

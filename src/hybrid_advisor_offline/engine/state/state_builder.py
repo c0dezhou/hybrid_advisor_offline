@@ -11,6 +11,7 @@ from typing import Union, Optional
 from hybrid_advisor_offline.offline.cql.train_usr_model import get_model_features
 
 USER_MODEL_PATH = "./models/user_model.pkl"
+INCLUDE_USER_IN_STATE = int(os.environ.get("INCLUDE_USER_IN_STATE", "1")) == 1
 
 # 在模块加载时一次性加载用户模型pipeline和预处理器，以提高效率
 try:
@@ -132,6 +133,14 @@ def make_up_to_vec(up: UserProfile):
     # 要展平可能之后用于拼接
     return _user_model_preprocessor.transform(user_df).toarray().flatten().astype(np.float32)
 
+def _maybe_mask_user_vec(user_vec: np.ndarray) -> np.ndarray:
+    """
+    当 INCLUDE_USER_IN_STATE=0 时，将用户特征置零但保留原始维度。
+    """
+    if INCLUDE_USER_IN_STATE:
+        return user_vec
+    return np.zeros_like(user_vec, dtype=np.float32)
+
 def build_state_vec(
     mkt_features: MarketSnapshot,
     user_profile: UserProfile,
@@ -161,6 +170,7 @@ def build_state_vec(
     else:
         user_vec = np.asarray(user_vector, dtype=np.float32)
     # print(f"DEBUG: user_vec shape={user_vec.shape}")
+    user_vec = _maybe_mask_user_vec(user_vec)
 
     # 处理当前资产配置
     alloc_vec = np.asarray(curr_alloc, dtype=np.float32)

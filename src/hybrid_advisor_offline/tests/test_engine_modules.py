@@ -2,7 +2,9 @@ import numpy as np
 import pytest
 
 from hybrid_advisor_offline.engine.act_safety.act_cards_factory import build_card_factory
+from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import ALL_CARDS
 from hybrid_advisor_offline.engine.policy import explain, policy_based_rule
+from hybrid_advisor_offline.engine.personal import personal_prior
 from hybrid_advisor_offline.engine.rewards import reward_architect
 
 
@@ -45,7 +47,7 @@ def test_compute_reward_without_model(monkeypatch):
         loan="no",
     )
     with pytest.raises(RuntimeError):
-        reward_architect.compute_reward(0.1, profile, drawdown=0.0)
+        reward_architect.compute_reward(0.1, 0.0, profile)
 
 
 def test_build_explain_pack_text():
@@ -58,3 +60,80 @@ def test_build_explain_pack_text():
     print(pack["customer_friendly_text"])
     print(pack["audit_text"])
     assert "进取型" in pack["customer_friendly_text"]
+
+
+def _make_user(**overrides):
+    defaults = dict(
+        age=40,
+        job="management",
+        marital="married",
+        education="tertiary",
+        default="no",
+        balance=5000,
+        housing="no",
+        loan="no",
+    )
+    defaults.update(overrides)
+    return reward_architect.UserProfile(**defaults)
+
+
+def test_compute_risk_aversion_rules():
+    baseline = _make_user()
+    assert reward_architect.compute_risk_aversion(baseline) == pytest.approx(1.0)
+
+    aggressive = _make_user(age=25, balance=20_000)
+    assert reward_architect.compute_risk_aversion(aggressive) == pytest.approx(0.72, rel=1e-3)
+
+    conservative = _make_user(age=65, balance=200, housing="yes", loan="yes")
+    # 1.3 (age) * 1.1 (balance) * 1.1 (housing) * 1.1 (loan) = 1.7323 -> clip 到 1.5
+    assert reward_architect.compute_risk_aversion(conservative) == pytest.approx(1.5)
+
+
+def test_reward_toggle(monkeypatch):
+    profile = _make_user(age=65, balance=200, housing="yes", loan="yes")
+    monkeypatch.setattr(reward_architect, "USE_PERSONAL_RISK_IN_REWARD", 1)
+    reward_personal = reward_architect.compute_reward(
+        0.01,
+        0.05,
+        profile,
+        accept_prob=0.0,
+    )
+
+    monkeypatch.setattr(reward_architect, "USE_PERSONAL_RISK_IN_REWARD", 0)
+    reward_uniform = reward_architect.compute_reward(
+        0.01,
+        0.05,
+        profile,
+        accept_prob=0.0,
+    )
+
+    assert reward_personal != reward_uniform
+
+
+def test_personal_prior_switch(monkeypatch):
+    cards = list(ALL_CARDS)
+    allowed = [card.act_id for card in cards]
+
+    monkeypatch.setattr(personal_prior, "USE_PERSONAL_PRIOR", False)
+    zeros = personal_prior.build_personal_prior(
+        allowed,
+        prefs={"risk_hint": "aggressive"},
+        risk_bucket=2,
+    )
+    assert set(zeros.keys()) == set(allowed)
+    assert all(val == pytest.approx(0.0) for val in zeros.values())
+
+    monkeypatch.setattr(personal_prior, "USE_PERSONAL_PRIOR", True)
+    bumps = personal_prior.build_personal_prior(
+        allowed,
+        prefs={"risk_hint": "conservative", "horizon_years": 2},
+        risk_bucket=2,
+    )
+    assert len(bumps) == len(allowed)
+    assert max(bumps.values()) <= personal_prior.PRIOR_CAP + 1e-6
+    assert min(bumps.values()) >= -personal_prior.PRIOR_CAP - 1e-6
+
+    # 保守偏好应当更青睐低风险卡片
+    low_risk = min(cards, key=lambda c: c.risk_level).act_id
+    high_risk = max(cards, key=lambda c: c.risk_level).act_id
+    assert bumps[low_risk] > bumps[high_risk]

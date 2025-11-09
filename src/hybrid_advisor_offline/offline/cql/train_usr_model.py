@@ -22,16 +22,16 @@ def get_model_features():
     categori_feature = ['job', 'marital', 'education', 'default', 'housing', 'loan', 'contact', 'day_of_week', 'month', 'poutcome']
     return num_feature, categori_feature # 返回一个tuple
 
-def tarin_usr_accetp_model():
+def tarin_usr_accetp_model(data_file: str = DATA_FILE, model_path: str = MODEL_PATH):
     """
     训练用户接受度模型，使用logistic 回归
     """
     print("-----开始训练用户接受度模型-----")
 
     # 1. --------加载数据
-    if not os.path.exists(DATA_FILE):
-        raise FileNotFoundError(f"数据文件未找到，请先generate数据")
-    df = pd.read_csv(DATA_FILE, sep=';')
+    if not os.path.exists(data_file):
+        raise FileNotFoundError(f"数据文件未找到：{data_file}，请先下载或生成。")
+    df = pd.read_csv(data_file, sep=';')
     print(f"已经加载{len(df)}行数据")
 
     # 2. --------数据预处理
@@ -80,10 +80,41 @@ def tarin_usr_accetp_model():
     print(classification_report(y_test, y_pred, target_names=['未接受', '接受']))
 
     # 保存训练好的模型 Pipeline
-    if not os.path.exists(MODEL_DIR):
-        os.makedirs(MODEL_DIR)
-        print(f"已创建目录: {MODEL_DIR}")
+    model_dir = os.path.dirname(model_path) or "."
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir, exist_ok=True)
+        print(f"已创建目录: {model_dir}")
         
-    joblib.dump(model_pipline,MODEL_PATH)
+    joblib.dump(model_pipline, model_path)
     # 模型预测的准确性严重依赖于新数据的预处理方式必须和训练数据完全一致
-    print(f"\n模型 Pipeline 已保存至: {MODEL_PATH}")
+    print(f"\n模型 Pipeline 已保存至: {model_path}")
+
+
+def _parse_args():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="训练用户接受度模型，并导出 ./models/user_model.pkl（或自定义路径）。"
+    )
+    parser.add_argument(
+        "--data",
+        type=str,
+        default=DATA_FILE,
+        help=f"UCI 用户数据 CSV（默认: {DATA_FILE}）",
+    )
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=MODEL_PATH,
+        help=f"模型输出路径（默认: {MODEL_PATH}）",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = _parse_args()
+    tarin_usr_accetp_model(args.data, args.output)
+
+
+if __name__ == "__main__":
+    main()

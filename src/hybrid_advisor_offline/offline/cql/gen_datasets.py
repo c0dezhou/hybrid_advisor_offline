@@ -41,12 +41,12 @@ DATA_DIR = "./data"
 _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
 
 USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
-OUTPUT_DATASET_PATH = "./data/offline_dataset.h5"  # 输出的数据集文件
+OUTPUT_DATASET_PATH = os.environ.get("OUTPUT_DATASET_PATH", "./data/offline_dataset.h5")  # 输出的数据集文件
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
 # N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
 # N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
-# N_USERS_TO_SIMULATE = 10000  # 用于模拟的用户数量,生成10000条轨迹
-N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
+N_USERS_TO_SIMULATE = 20000  # 用于模拟的用户数量,生成10000条轨迹
+# N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
 EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
 POLICY_EPS_FIXED = float(os.getenv("POLICY_EPSILON", "0.2"))  # 固定 ε 值，让 20% 的时间随机动作
 POLICY_SEED = 42
@@ -201,28 +201,30 @@ def generate_offline_dataset():
         print("没有可生成的用户或步数，直接返回。")
         return
 
-    tmp_memmap_dir = tempfile.mkdtemp(prefix="offline_dataset_memmap_")
-    memmap_handles: list[np.memmap] = []
+    tmp_mm_dir = tempfile.mkdtemp(prefix="offline_dataset_memmap_")
+    mm_handles: list[np.memmap] = []
 
-    def _alloc_memmap(name: str, shape, dtype):
-        path = os.path.join(tmp_memmap_dir, f"{name}.dat")
+    def _alloc_mm(name: str, shape, dtype):
+        """轻量封装一下 np.memmap，省得每次写重复代码。"""
+        path = os.path.join(tmp_mm_dir, f"{name}.dat")
         mmap = np.memmap(path, dtype=dtype, mode="w+", shape=shape)
-        memmap_handles.append(mmap)
+        mm_handles.append(mmap)
         return mmap
 
-    obss_mem = _alloc_memmap("obs", (max_steps, obs_dim), np.float32)
-    acts_mem = _alloc_memmap("acts", (max_steps,), np.int64)
-    rwds_mem = _alloc_memmap("rews", (max_steps,), np.float32)
-    dones_mem = _alloc_memmap("dones", (max_steps,), np.float32)
-    prop_mem = _alloc_memmap("props", (max_steps,), np.float32)
-    episode_ids_mem = _alloc_memmap("episode_ids", (max_steps,), np.int32)
+    obss_mem = _alloc_mm("obs", (max_steps, obs_dim), np.float32)
+    acts_mem = _alloc_mm("acts", (max_steps,), np.int64)
+    rwds_mem = _alloc_mm("rews", (max_steps,), np.float32)
+    dones_mem = _alloc_mm("dones", (max_steps,), np.float32)
+    prop_mem = _alloc_mm("props", (max_steps,), np.float32)
+    episode_ids_mem = _alloc_mm("episode_ids", (max_steps,), np.int32)
 
     rng = np.random.default_rng(POLICY_SEED)
-    episode_counter = 0
-    ep_returns: list[float] = []
-    cursor = 0
+    ep_id_counter = 0
+    ep_return_bucket: list[float] = []
+    row_ptr = 0
 
     print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
+    # 主循环：逐个用户跑一条 episode，把 (s,a,r,p) 写入 memmap
     for _, user_row in tqdm(sampled_users_df.iterrows(), total=len(sampled_users_df)):
         user_profile = user_row_to_profile(user_row)
         user_vector = make_up_to_vec(user_profile)
@@ -254,30 +256,30 @@ def generate_offline_dataset():
 
             reward = compute_reward(
                 market_return,
-                user_profile,
                 drawdown=0.0,
+                user_profile=user_profile,
                 accept_prob=user_accept_prob,
             )
             ep_return += reward
 
-            if cursor >= max_steps:
+            if row_ptr >= max_steps:
                 raise RuntimeError(
                     "预估的 max_steps 太小，写入越界。请调整 EPISODE_MAX_STEPS 或减少用户数量。"
                 )
-            obss_mem[cursor] = state_vec
-            acts_mem[cursor] = action_id
-            rwds_mem[cursor] = reward
-            dones_mem[cursor] = 1.0 if done else 0.0
-            prop_mem[cursor] = float(propensity)
-            episode_ids_mem[cursor] = episode_counter
-            cursor += 1
+            obss_mem[row_ptr] = state_vec
+            acts_mem[row_ptr] = action_id
+            rwds_mem[row_ptr] = reward
+            dones_mem[row_ptr] = 1.0 if done else 0.0
+            prop_mem[row_ptr] = float(propensity)
+            episode_ids_mem[row_ptr] = ep_id_counter
+            row_ptr += 1
 
             info = next_info
 
-        episode_counter += 1
-        ep_returns.append(ep_return)
+        ep_id_counter += 1
+        ep_return_bucket.append(ep_return)
 
-    print(f"\n总共生成了 {cursor} 个转换。")
+    print(f"\n总共生成了 {row_ptr} 个转换。")
 
     # 3.1 轨迹质量过滤（可选）
     def _filter_by_returns(e_returns, keep_frac, min_return):
@@ -300,10 +302,10 @@ def generate_offline_dataset():
             return None
         return keep_ids
 
-    keep_episode_ids = _filter_by_returns(ep_returns, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN)
+    keep_episode_ids = _filter_by_returns(ep_return_bucket, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN)
 
     # 4. 创建并保存 d3rlpy MDPDataset
-    used_slice = slice(0, cursor)
+    used_slice = slice(0, row_ptr)
     obss_array = obss_mem[used_slice]
     acts_array = acts_mem[used_slice]
     rwds_array = rwds_mem[used_slice]
@@ -321,6 +323,7 @@ def generate_offline_dataset():
         prop_array = prop_array[mask]
         episode_ids_array = episode_ids_array[mask]
 
+    # 最终把内存片段打包成 d3rlpy 的 MDPDataset，方便后续 BC / BCQ / CQL 复用
     dataset = MDPDataset(
         observations=obss_array,
         actions=acts_array,
