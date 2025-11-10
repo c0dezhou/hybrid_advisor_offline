@@ -44,6 +44,7 @@ _STOOQ_MAP = {"SPY": "spy.us", "AGG": "agg.us", "SHY": "shy.us"}
 USER_DATA_FILE = "./data/bm_full.csv"  # 输入的用户数据文件
 OUTPUT_DATASET_PATH = os.environ.get("OUTPUT_DATASET_PATH", "./data/offline_dataset.h5")  # 输出的数据集文件
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
+EPISODE_SUMMARY_SUFFIX = "_episodes.csv"
 # N_USERS_TO_SIMULATE = 500  # 用于模拟的用户数量,生成500条轨迹
 # N_USERS_TO_SIMULATE = 1000  # 用于模拟的用户数量,生成1000条轨迹
 # N_USERS_TO_SIMULATE = 20000  # 用于模拟的用户数量,生成10000条轨迹
@@ -67,6 +68,11 @@ def _behavior_meta_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
     """根据数据集路径推导行为策略统计文件路径。"""
     base, _ = os.path.splitext(dataset_path)
     return f"{base}{BEHAVIOR_META_SUFFIX}"
+
+
+def _episode_summary_path(dataset_path: str = OUTPUT_DATASET_PATH) -> str:
+    base, _ = os.path.splitext(dataset_path)
+    return f"{base}{EPISODE_SUMMARY_SUFFIX}"
 
 def _fetch_data_from_yf(ticker, maxretry, base_sleep_second):
     for attempt in range(1, maxretry + 1):
@@ -188,7 +194,9 @@ def generate_offline_dataset():
         print(f"警告: 请求模拟 {N_USERS_TO_SIMULATE} 个用户, 但只有 {len(user_df)} 个可用。将使用所有用户。")
         sampled_users_df = user_df
     else:
-        sampled_users_df = user_df.sample(n=N_USERS_TO_SIMULATE, random_state=42) # 随机抽取用户
+        # 随机不放回抽取用户
+        sampled_users_df = user_df.sample(n=N_USERS_TO_SIMULATE, random_state=42,replace=False)
+        
 
     # 2. 初始化环境并获取状态维度
     try:
@@ -227,6 +235,7 @@ def generate_offline_dataset():
     rng = np.random.default_rng(POLICY_SEED)
     ep_id_counter = 0
     ep_return_bucket: list[float] = []
+    ep_length_bucket: list[int] = []
     episode_profiles: list[dict] = []
     row_ptr = 0
 
@@ -240,6 +249,7 @@ def generate_offline_dataset():
 
         info = env.reset()
         ep_return = 0.0
+        ep_steps = 0
 
         done = False
         while not done:
@@ -260,14 +270,16 @@ def generate_offline_dataset():
             )
 
             market_return, done, next_info = env.step(action_id)
+            drawdown = float(next_info.get("drawdown", 0.0))
 
             reward = compute_reward(
                 market_return,
-                drawdown=0.0,
+                drawdown=drawdown,
                 user_profile=user_profile,
                 accept_prob=user_accept_prob,
             )
             ep_return += reward
+            ep_steps += 1
 
             if row_ptr >= max_steps:
                 raise RuntimeError(
@@ -286,6 +298,7 @@ def generate_offline_dataset():
         episode_profiles.append(_profile_to_meta(user_profile))
         ep_id_counter += 1
         ep_return_bucket.append(ep_return)
+        ep_length_bucket.append(ep_steps)
 
     print(f"\n总共生成了 {row_ptr} 个转换。")
 
@@ -311,6 +324,11 @@ def generate_offline_dataset():
         return keep_ids
 
     keep_episode_ids = _filter_by_returns(ep_return_bucket, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN)
+    if keep_episode_ids:
+        keep_flags = np.isin(np.arange(len(ep_return_bucket)), list(keep_episode_ids))
+        ep_return_bucket = [ret for ret, keep in zip(ep_return_bucket, keep_flags) if keep]
+        ep_length_bucket = [length for length, keep in zip(ep_length_bucket, keep_flags) if keep]
+        episode_profiles = [profile for profile, keep in zip(episode_profiles, keep_flags) if keep]
 
     # 4. 创建并保存 d3rlpy MDPDataset
     used_slice = slice(0, row_ptr)
@@ -356,6 +374,17 @@ def generate_offline_dataset():
     )
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
 
+    summary_df = pd.DataFrame(
+        {
+            "episode_id": np.arange(len(ep_return_bucket), dtype=np.int32),
+            "total_reward": ep_return_bucket,
+            "length": ep_length_bucket,
+        }
+    )
+    summary_path = _episode_summary_path(OUTPUT_DATASET_PATH)
+    summary_df.to_csv(summary_path, index=False)
+    print(f"episode 汇总已保存至 {summary_path}")
+
 def _parse_args():
     parser = argparse.ArgumentParser(
         description="生成离线数据集，可选地触发评估管线。",
@@ -386,6 +415,24 @@ def _parse_args():
         "--filter-low-return",
         action="store_true",
         help="启用低回报轨迹过滤（默认关闭，调试用）。",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=str,
+        default=None,
+        help="输出数据集路径（默认读取 OUTPUT_DATASET_PATH 环境变量或 ./data/offline_dataset.h5）。",
+    )
+    parser.add_argument(
+        "--num-users",
+        type=int,
+        default=None,
+        help="生成轨迹的用户数量（默认 N_USERS_TO_SIMULATE）。",
+    )
+    parser.add_argument(
+        "--episode-steps",
+        type=int,
+        default=None,
+        help="单条轨迹的最大步数（默认 EPISODE_MAX_STEPS）。",
     )
     parser.add_argument(
         "--top-frac",
@@ -423,6 +470,7 @@ def main():
     args = _parse_args()
 
     global POLICY_EPS_FIXED, FILTER_LOW_RETURN, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN
+    global OUTPUT_DATASET_PATH, N_USERS_TO_SIMULATE, EPISODE_MAX_STEPS
     if args.epsilon is not None:
         POLICY_EPS_FIXED = max(0.0, min(1.0, args.epsilon))
         print(f"使用自定义 ε 探索率: {POLICY_EPS_FIXED}")
@@ -436,6 +484,15 @@ def main():
             f"已启用轨迹过滤：top_frac={DATASET_KEEP_TOP_FRAC}, "
             f"min_return={DATASET_MIN_RETURN}"
         )
+    if args.dataset_path:
+        OUTPUT_DATASET_PATH = args.dataset_path
+        print(f"使用自定义数据集路径: {OUTPUT_DATASET_PATH}")
+    if args.num_users is not None:
+        N_USERS_TO_SIMULATE = max(1, args.num_users)
+        print(f"使用自定义用户数量: {N_USERS_TO_SIMULATE}")
+    if args.episode_steps is not None:
+        EPISODE_MAX_STEPS = max(1, args.episode_steps)
+        print(f"使用自定义 episode 步数: {EPISODE_MAX_STEPS}")
 
     # download_mkt_data()
     generate_offline_dataset()

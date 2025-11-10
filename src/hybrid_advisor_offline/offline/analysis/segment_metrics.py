@@ -40,6 +40,27 @@ def _load_replay_buffer(path: str):
     return buffer
 
 
+def load_episode_summaries(summary_path: Optional[str]) -> Optional[List[EpisodeSnapshot]]:
+    if not summary_path:
+        return None
+    if not os.path.exists(summary_path):
+        return None
+    df = pd.read_csv(summary_path)
+    required = {"episode_id", "total_reward", "length"}
+    if not required.issubset(df.columns):
+        raise ValueError(f"{summary_path} 缺少所需列 {required}")
+    snapshots = [
+        EpisodeSnapshot(
+            int(row.episode_id),
+            float(row.total_reward),
+            int(row.length),
+            None,
+        )
+        for row in df.itertuples(index=False)
+    ]
+    return snapshots
+
+
 def _npz_to_profiles(meta_path: str) -> List[UserProfile]:
     if not os.path.exists(meta_path):
         raise FileNotFoundError(f"找不到行为策略 meta：{meta_path}")
@@ -205,6 +226,12 @@ def parse_args() -> argparse.Namespace:
         help="行为策略 meta（npz）路径，须包含 user_profiles。",
     )
     parser.add_argument(
+        "--episode-summary",
+        required=False,
+        default=None,
+        help="可选的 episode 汇总 CSV，若提供且不加载策略，则直接复用。",
+    )
+    parser.add_argument(
         "--model",
         default=None,
         help="策略模型路径，若缺省则表示行为策略 baseline。",
@@ -230,13 +257,24 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    buffer = _load_replay_buffer(args.dataset)
+    summaries = load_episode_summaries(args.episode_summary)
+    buffer = None
+    if args.model or summaries is None:
+        buffer = _load_replay_buffer(args.dataset)
+
     profiles = _npz_to_profiles(args.behavior_meta)
-    if len(profiles) < len(buffer.episodes):
+    expected_episodes = len(summaries) if summaries is not None else len(buffer.episodes)
+    if len(profiles) < expected_episodes:
         raise ValueError("user_profiles 数量少于 episode 数，无法对齐。")
 
-    policy = _load_policy(args.model, buffer)
-    snapshots = collect_episode_snapshots(buffer, policy=policy)
+    policy = _load_policy(args.model, buffer) if buffer is not None and args.model else None
+
+    if summaries is not None and policy is None:
+        snapshots = summaries
+    else:
+        if buffer is None:
+            buffer = _load_replay_buffer(args.dataset)
+        snapshots = collect_episode_snapshots(buffer, policy=policy)
     stats = aggregate_by_segment(args.algo_name, snapshots, profiles)
 
     csv_path = Path(args.output_csv)

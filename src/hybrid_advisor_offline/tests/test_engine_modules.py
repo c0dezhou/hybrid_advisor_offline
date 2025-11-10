@@ -110,6 +110,47 @@ def test_reward_toggle(monkeypatch):
     assert reward_personal != reward_uniform
 
 
+def test_drawdown_personalization(monkeypatch):
+    risk_averse = _make_user(age=65, balance=200, housing="yes", loan="yes")
+    risk_tolerant = _make_user(age=28, balance=20_000, housing="no", loan="no")
+    monkeypatch.setattr(reward_architect, "USE_PERSONAL_RISK_IN_REWARD", 1)
+
+    conservative_reward = reward_architect.compute_reward(
+        market_return=0.0,
+        drawdown=0.2,
+        user_profile=risk_averse,
+        accept_prob=0.0,
+    )
+    aggressive_reward = reward_architect.compute_reward(
+        market_return=0.0,
+        drawdown=0.2,
+        user_profile=risk_tolerant,
+        accept_prob=0.0,
+    )
+    assert conservative_reward < aggressive_reward
+
+
+def test_drawdown_uniform_mode(monkeypatch):
+    user_a = _make_user(age=65, balance=200, housing="yes", loan="yes")
+    user_b = _make_user(age=28, balance=20_000, housing="no", loan="no")
+    monkeypatch.setattr(reward_architect, "USE_PERSONAL_RISK_IN_REWARD", 0)
+    monkeypatch.setattr(reward_architect, "UNIFORM_RA_FACTOR", 1.2)
+
+    reward_a = reward_architect.compute_reward(
+        market_return=0.0,
+        drawdown=0.2,
+        user_profile=user_a,
+        accept_prob=0.0,
+    )
+    reward_b = reward_architect.compute_reward(
+        market_return=0.0,
+        drawdown=0.2,
+        user_profile=user_b,
+        accept_prob=0.0,
+    )
+    assert reward_a == pytest.approx(reward_b)
+
+
 def test_personal_prior_switch(monkeypatch):
     cards = list(ALL_CARDS)
     allowed = [card.act_id for card in cards]

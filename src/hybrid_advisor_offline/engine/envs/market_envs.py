@@ -38,6 +38,9 @@ class MarketEnv:
         self.steps_in_episode = 0
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0,0.0,1.0]) # 初始全现金
+        self.equity = 1.0
+        self.high_water = 1.0
+        self.curr_drawdown = 0.0
 
     def _pre_mkt_sshots(self):
         """
@@ -76,11 +79,15 @@ class MarketEnv:
         self.steps_in_episode = 0
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0, 0.0, 1.0])
+        self.equity = 1.0
+        self.high_water = 1.0
+        self.curr_drawdown = 0.0
 
         info = {
             "mkt_sshot": self.mkt_sshots[self.curr_step],
             "curr_alloc": self.curr_alloc,
             "portfolio_value": self.portfolio_value,
+            "drawdown": self.curr_drawdown,
         }
         return info
     
@@ -107,6 +114,13 @@ class MarketEnv:
 
         #5. 根据市场变动更新投资组合价值
         self.portfolio_value *= (1+portfolio_daily_return)
+        # 维护净值曲线与回撤，供 reward 使用
+        self.equity *= (1.0 + portfolio_daily_return)
+        self.high_water = max(self.high_water, self.equity)
+        if self.high_water > 0:
+            self.curr_drawdown = max(0.0, 1.0 - self.equity / self.high_water)
+        else:
+            self.curr_drawdown = 0.0
 
         #6. 移动到St+1
         self.curr_step += 1
@@ -125,6 +139,7 @@ class MarketEnv:
             "mkt_sshot": self.mkt_sshots[next_idx],
             "curr_alloc": self.curr_alloc,
             "portfolio_value": self.portfolio_value,
+            "drawdown": self.curr_drawdown,
         }
 
         return portfolio_daily_return, done, next_info
@@ -150,5 +165,4 @@ if __name__ == '__main__':
         )
     
     print("\n环境模拟测试完成。")
-
 
