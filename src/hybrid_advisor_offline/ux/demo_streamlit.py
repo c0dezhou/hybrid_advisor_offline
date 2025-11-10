@@ -6,7 +6,7 @@ Streamlit 演示应用：Hybrid Advisor Offline
 1. 载入最新的 CQL 模型与市场快照（缓存）。
 2. 在左侧面板输入客户画像、账户规模与风险检查设定。
 3. 右侧实时展示合规可用动作的 Q 值、推荐排序与合规解释。
-4. 兼容危机模式（提高现金下限），并输出可复制的审计摘要。
+4. 输出可复制的审计摘要，便于审计追溯。
 
 运行方式
     streamlit run -m hybrid_advisor_offline.ux.demo_streamlit
@@ -56,18 +56,6 @@ def _predict_q_values(policy, state_vec: np.ndarray) -> np.ndarray:
     return policy.predict_value(state_batch, action_batch)
 
 
-def _apply_crisis_floor(allowed_ids: List[int], crisis_mode: bool) -> List[int]:
-    if not crisis_mode:
-        return allowed_ids
-    min_cash = 0.2
-    filtered = [
-        act_id
-        for act_id in allowed_ids
-        if get_card_by_id(act_id).target_alloc[2] >= min_cash
-    ]
-    return filtered or allowed_ids
-
-
 @st.cache_resource(show_spinner=False)
 def load_resources():
     """加载 CQL 策略与最新市场快照；失败时返回 (None, None)。"""
@@ -97,9 +85,6 @@ def _collect_user_inputs() -> Dict:
     loan = st.sidebar.radio("消费贷款", ["yes", "no"], index=1, horizontal=True)
     default = st.sidebar.radio("历史违约", ["no", "yes"], index=0, horizontal=True)
 
-    campaign = int(st.sidebar.number_input("当前活动触达次数", min_value=1, max_value=10, value=1))
-    duration = int(st.sidebar.number_input("最近一次沟通时长 (秒)", min_value=30, max_value=600, value=180))
-
     alloc_templates = {
         "稳健型 (40/40/20)": (0.4, 0.4, 0.2),
         "保守型 (20/30/50)": (0.2, 0.3, 0.5),
@@ -107,8 +92,6 @@ def _collect_user_inputs() -> Dict:
     }
     alloc_label = st.sidebar.selectbox("当前组合", list(alloc_templates.keys()), index=0)
     current_alloc = np.array(alloc_templates[alloc_label], dtype=np.float32)
-
-    crisis_mode = st.sidebar.toggle("危机模式（提高现金底线）", value=False)
 
     profile = UserProfile(
         age=age,
@@ -119,14 +102,11 @@ def _collect_user_inputs() -> Dict:
         balance=balance,
         housing=housing,
         loan=loan,
-        duration=duration,
-        campaign=campaign,
     )
 
     return {
         "profile": profile,
         "current_alloc": current_alloc,
-        "crisis_mode": crisis_mode,
     }
 
 
@@ -194,22 +174,21 @@ def _render_policy_diff_dashboard():
     st.table(pd.DataFrame(rows))
 
 
-def render_recommendations(policy, snapshot, profile: UserProfile, current_alloc: np.ndarray, crisis_mode: bool):
+def render_recommendations(policy, snapshot, profile: UserProfile, current_alloc: np.ndarray):
     state_vec = build_state_vec(snapshot, profile, current_alloc)
     q_values = _predict_q_values(policy, state_vec)
 
     allowed_cards = allowed_cards_for_user(profile.risk_bucket)
     allowed_ids = [card.act_id for card in allowed_cards]
-    gated_ids = _apply_crisis_floor(allowed_ids, crisis_mode)
 
     priors = build_personal_prior(
-        gated_ids,
+        allowed_ids,
         prefs=infer_prefs_from_profile(profile),
         risk_bucket=profile.risk_bucket,
     )
 
     mask = np.full_like(q_values, -np.inf, dtype=np.float32)
-    for act_id in gated_ids:
+    for act_id in allowed_ids:
         if 0 <= act_id < len(mask):
             mask[act_id] = 0.0
     masked_q = q_values + mask
@@ -220,7 +199,7 @@ def render_recommendations(policy, snapshot, profile: UserProfile, current_alloc
                 prior_vec[act_id] = bump
         masked_q = masked_q + prior_vec
 
-    ranked_ids = sorted(gated_ids, key=lambda aid: masked_q[aid], reverse=True)
+    ranked_ids = sorted(allowed_ids, key=lambda aid: masked_q[aid], reverse=True)
     if not ranked_ids:
         st.warning("当前约束下没有可用的动作卡片，请调整输入。")
         return
@@ -241,7 +220,6 @@ def render_recommendations(policy, snapshot, profile: UserProfile, current_alloc
                 "card_risk_level": card.risk_level,
                 "user_risk_bucket": profile.risk_bucket,
                 "target_alloc": card.target_alloc,
-                "crisis_mode": crisis_mode,
             },
         )
         q_score = float(masked_q[act_id])
@@ -260,8 +238,8 @@ def render_recommendations(policy, snapshot, profile: UserProfile, current_alloc
     st.markdown("#### 合规可用动作的 Q 值分布")
     df = pd.DataFrame(
         {
-            "card_id": [get_card_by_id(aid).card_id for aid in gated_ids],
-            "q_value": [float(masked_q[aid]) for aid in gated_ids],
+            "card_id": [get_card_by_id(aid).card_id for aid in allowed_ids],
+            "q_value": [float(masked_q[aid]) for aid in allowed_ids],
         }
     ).sort_values("q_value", ascending=False)
     st.bar_chart(df, x="card_id", y="q_value", color="#4B8BBE")
@@ -306,18 +284,12 @@ def main():
                 _format_percentage_vector(inputs["current_alloc"]),
                 help="用于拼接状态向量，也可作为组合调仓参考。",
             )
-            st.metric("危机模式", "ON" if inputs["crisis_mode"] else "OFF")
-            st.caption(
-                "危机模式会强制现金权重 ≥ 20%，常用于演示紧急市场环境下的安全帽。"
-            )
-
         with col_right:
             render_recommendations(
                 policy,
                 snapshot,
                 profile=inputs["profile"],
                 current_alloc=inputs["current_alloc"],
-                crisis_mode=inputs["crisis_mode"],
             )
 
     with tab_analysis:

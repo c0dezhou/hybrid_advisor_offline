@@ -71,8 +71,6 @@ def _rule_based_refine(text: str, context: Dict[str, Any]) -> str:
     alloc = _format_alloc(context.get("target_alloc"))
     if alloc:
         summary_bits.append(f"配置结构：{alloc}")
-    if context.get("crisis_mode"):
-        summary_bits.append("危机模式：已抬高现金占比")
 
     prefix = "；".join(summary_bits)
     refined = base
@@ -201,7 +199,6 @@ def _build_messages(text: str, context: Dict[str, Any]) -> Tuple[str, str]:
         f"客户风险等级：{RISK_LABELS.get(context.get('user_risk_bucket'), '未知')}\n"
         f"卡片风险等级：{RISK_LABELS.get(context.get('card_risk_level'), '未知')}\n"
         f"目标配置：{_format_alloc(context.get('target_alloc')) or '未提供'}\n"
-        f"危机模式：{'是' if context.get('crisis_mode') else '否'}\n"
         f"原始文案：{text.strip()}\n"
         "请在保持含义不变、严格避免夸大承诺的情况下，润色为 1 段中文说明。"
     )
