@@ -1,4 +1,5 @@
 import os
+import logging
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Any
@@ -9,6 +10,8 @@ from hybrid_advisor_offline.engine.state.state_builder import MarketSnapshot
 DATA_FILE = "./data/mkt_data.csv"
 INITIAL_BALANCE = 1000000.0  # 初始投资组合价值
 TRANSACTION_COST_PCT = 0.001  # 0.1% 的交易成本,核心作用是对过于频繁的交易施加惩罚
+
+logger = logging.getLogger(__name__)
 
 class MarketEnv:
     """
@@ -28,7 +31,9 @@ class MarketEnv:
         # 计算当前行与前一行的变化率，公式为 (当前值 - 上一值) / 上一值，即每日收益率
         self.daily_returns = self.mkt_data.pct_change().fillna(0)# 第一天NaN填充为0
         self.n_steps = len(self.mkt_data) #交易日总数，也就是模拟的总步数
+        self._num_days = self.n_steps
         self.max_episode_steps = max_episode_steps or self.n_steps
+        self._max_episode_steps = self.max_episode_steps
     
         # 为每个时间步预先计算市场快照
         self._pre_mkt_sshots()
@@ -41,6 +46,13 @@ class MarketEnv:
         self.equity = 1.0
         self.high_water = 1.0
         self.curr_drawdown = 0.0
+        self._rng = np.random.default_rng()
+        self._start_mode = self._load_start_mode()
+        self._fixed_start_idx = self._load_fixed_start_idx()
+        self._current_start_idx = self._fixed_start_idx
+        self._cursor = self._current_start_idx
+        self._reset_counter = 0
+        self._start_config_logged = False
 
     def _pre_mkt_sshots(self):
         """
@@ -73,9 +85,66 @@ class MarketEnv:
                 )
             self.mkt_sshots.append(sshot)
 
+    def _load_start_mode(self) -> str:
+        mode = os.getenv("EPISODE_START_MODE", "").strip().lower() or "fixed"
+        if mode not in {"fixed", "random"}:
+            logger.warning(
+                "EPISODE_START_MODE=%s 不受支持，已回退至 fixed。", mode
+            )
+            mode = "fixed"
+        return mode
+
+    def _load_fixed_start_idx(self) -> int:
+        raw = os.getenv("EPISODE_FIXED_START")
+        if raw is None:
+            return 0
+        try:
+            idx = int(raw)
+        except ValueError:
+            logger.warning(
+                "无法解析 EPISODE_FIXED_START=%s，已回退到 0。", raw
+            )
+            idx = 0
+        return max(0, min(idx, self._num_days - 1))
+
+    def _max_random_start_idx(self) -> int:
+        return max(0, self._num_days - self._max_episode_steps)
+
+    def _sample_episode_start_idx(self) -> int:
+        if self._start_mode == "fixed":
+            return self._fixed_start_idx
+        max_idx = self._max_random_start_idx()
+        if max_idx <= 0:
+            return 0
+        return int(self._rng.integers(0, max_idx + 1))
+
+    def _log_start_config_once(self):
+        if self._start_config_logged:
+            return
+        logger.info(
+            "MarketEnv start mode=%s, fixed_start=%d, random_range=[%d, %d], num_days=%d, max_episode_steps=%d",
+            self._start_mode,
+            self._fixed_start_idx,
+            0,
+            self._max_random_start_idx(),
+            self._num_days,
+            self._max_episode_steps,
+        )
+        self._start_config_logged = True
+
     def reset(self):
         """重置环境到初始态，在一个episode开始被调用"""
-        self.curr_step = 0
+        self._log_start_config_once()
+        self._current_start_idx = self._sample_episode_start_idx()
+        if self._start_mode == "random" and self._reset_counter < 5:
+            logger.debug(
+                "MarketEnv episode %d start idx=%d",
+                self._reset_counter,
+                self._current_start_idx,
+            )
+        self._reset_counter += 1
+        self._cursor = self._current_start_idx
+        self.curr_step = self._cursor
         self.steps_in_episode = 0
         self.portfolio_value = INITIAL_BALANCE
         self.curr_alloc = np.array([0.0, 0.0, 1.0])
@@ -88,6 +157,7 @@ class MarketEnv:
             "curr_alloc": self.curr_alloc,
             "portfolio_value": self.portfolio_value,
             "drawdown": self.curr_drawdown,
+            "episode_start_idx": self._current_start_idx,
         }
         return info
     
@@ -108,7 +178,7 @@ class MarketEnv:
         self.curr_alloc = target_alloc
 
         # 4.计算当天的投资组合回报
-        today_returns = self.daily_returns.iloc[self.curr_step].values
+        today_returns = self.daily_returns.iloc[self._cursor].values
         # 今日操作总回报率，用点积
         portfolio_daily_return = np.dot(self.curr_alloc, today_returns)
 
@@ -123,16 +193,17 @@ class MarketEnv:
             self.curr_drawdown = 0.0
 
         #6. 移动到St+1
-        self.curr_step += 1
+        self._cursor += 1
+        self.curr_step = self._cursor
         self.steps_in_episode += 1
         done = (
-            self.curr_step >= self.n_steps
-            or self.steps_in_episode >= self.max_episode_steps
+            self._cursor >= self._num_days
+            or self.steps_in_episode >= self._max_episode_steps
         )
         # [ERROR] IndexError 是因为 MarketEnv.step 在推进到最后一个交易日后，
         # 把 curr_step 加到了 n_steps，但仍然试图用这个索引访问 self.mkt_sshots[self.curr_step]。
         # 列表长度是 n_steps，合法索引只有 0 … n_steps-1，所以一到结尾就越界了。
-        next_idx = min(self.curr_step, self.n_steps - 1)
+        next_idx = min(self._cursor, self._num_days - 1)
 
         # 7.准备下一个state的信息
         next_info = {
@@ -140,6 +211,7 @@ class MarketEnv:
             "curr_alloc": self.curr_alloc,
             "portfolio_value": self.portfolio_value,
             "drawdown": self.curr_drawdown,
+            "episode_start_idx": self._current_start_idx,
         }
 
         return portfolio_daily_return, done, next_info
@@ -165,4 +237,3 @@ if __name__ == '__main__':
         )
     
     print("\n环境模拟测试完成。")
-

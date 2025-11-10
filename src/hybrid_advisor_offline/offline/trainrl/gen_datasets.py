@@ -62,6 +62,20 @@ if IS_FAST_MODE:
     N_USERS_TO_SIMULATE = min(N_USERS_TO_SIMULATE, FAST_MODE_USER_CAP)
     EPISODE_MAX_STEPS = min(EPISODE_MAX_STEPS, FAST_MODE_STEP_CAP)
 
+FAST_EXPERIMENT_MODE = os.getenv("FAST_EXPERIMENT_MODE", "0") == "1"
+if FAST_EXPERIMENT_MODE:
+    fast_user_cap = int(os.getenv("FAST_EXPERIMENT_USER_CAP", "2000"))
+    fast_step_cap = int(os.getenv("FAST_EXPERIMENT_STEP_CAP", "64"))
+    prev_users = N_USERS_TO_SIMULATE
+    prev_steps = EPISODE_MAX_STEPS
+    N_USERS_TO_SIMULATE = min(N_USERS_TO_SIMULATE, fast_user_cap)
+    EPISODE_MAX_STEPS = min(EPISODE_MAX_STEPS, fast_step_cap)
+    print(
+        "[gen_datasets] FAST_EXPERIMENT_MODE=1, "
+        f"users {prev_users}->{N_USERS_TO_SIMULATE}, "
+        f"max_steps {prev_steps}->{EPISODE_MAX_STEPS}"
+    )
+
 FILTER_LOW_RETURN = os.getenv("FILTER_LOW_RETURN", "0") == "1"
 DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
 _min_return_env = os.getenv("DATASET_MIN_RETURN", "").strip()
@@ -250,6 +264,7 @@ def generate_offline_dataset():
     ep_return_bucket: list[float] = []
     ep_length_bucket: list[int] = []
     episode_profiles: list[dict] = []
+    episode_start_indices: list[int] = []
     row_ptr = 0
 
     print(f"正在为 {len(sampled_users_df)} 个用户模拟轨迹...")
@@ -261,6 +276,7 @@ def generate_offline_dataset():
         allowed_cards = allowed_cards_for_user(user_profile.risk_bucket)
 
         info = env.reset()
+        episode_start_idx = int(info.get("episode_start_idx", 0))
         ep_return = 0.0
         ep_steps = 0
 
@@ -308,7 +324,10 @@ def generate_offline_dataset():
 
             info = next_info
 
-        episode_profiles.append(_profile_to_meta(user_profile))
+        profile_meta = _profile_to_meta(user_profile)
+        profile_meta["episode_start_idx"] = episode_start_idx
+        episode_profiles.append(profile_meta)
+        episode_start_indices.append(episode_start_idx)
         ep_id_counter += 1
         ep_return_bucket.append(ep_return)
         ep_length_bucket.append(ep_steps)
@@ -338,10 +357,11 @@ def generate_offline_dataset():
 
     keep_episode_ids = _filter_by_returns(ep_return_bucket, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN)
     if keep_episode_ids:
-        keep_flags = np.isin(np.arange(len(ep_return_bucket)), list(keep_episode_ids))
+        keep_flags = list(np.isin(np.arange(len(ep_return_bucket)), list(keep_episode_ids)))
         ep_return_bucket = [ret for ret, keep in zip(ep_return_bucket, keep_flags) if keep]
         ep_length_bucket = [length for length, keep in zip(ep_length_bucket, keep_flags) if keep]
         episode_profiles = [profile for profile, keep in zip(episode_profiles, keep_flags) if keep]
+        episode_start_indices = [idx for idx, keep in zip(episode_start_indices, keep_flags) if keep]
 
     # 4. 创建并保存 d3rlpy MDPDataset
     used_slice = slice(0, row_ptr)
@@ -384,6 +404,7 @@ def generate_offline_dataset():
         terminals=dones_array,
         epsilon=np.array([POLICY_EPS_FIXED], dtype=np.float32),
         user_profiles=np.array(episode_profiles, dtype=object),
+        episode_start_idx=np.array(episode_start_indices, dtype=np.int32),
     )
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
 
@@ -392,6 +413,7 @@ def generate_offline_dataset():
             "episode_id": np.arange(len(ep_return_bucket), dtype=np.int32),
             "total_reward": ep_return_bucket,
             "length": ep_length_bucket,
+            "episode_start_idx": episode_start_indices,
         }
     )
     summary_path = _episode_summary_path(OUTPUT_DATASET_PATH)
