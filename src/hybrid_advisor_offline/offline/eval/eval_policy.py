@@ -33,6 +33,8 @@ except ImportError:  # pragma: no cover
 
 MODEL_PATH_DEFAULT = "./models/cql_discrete_model.pt"
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
+EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "full").lower()
+_FAST_MODE_NAMES = {"fast", "dev"}
 
 
 def _behavior_meta_path(dataset_path: str, override: str | None) -> str | None:
@@ -100,6 +102,11 @@ def parse_args():
         default=None,
         help="行为策略倾向文件路径（默认与 dataset 同名前缀 + _behavior.npz）。",
     )
+    parser.add_argument(
+        "--fast-dev",
+        action="store_true",
+        help="快速实验模式：缩短 FQE 步数和评估间隔。",
+    )
     return parser.parse_args()
 
 
@@ -108,6 +115,17 @@ def main() -> None:
 
     if args.require_gpu:
         _require_gpu()
+
+    is_fast = args.fast_dev or EXPERIMENT_MODE in _FAST_MODE_NAMES
+    fqe_steps = args.fqe_steps
+    eval_interval = args.eval_interval
+    if is_fast:
+        fqe_steps = min(fqe_steps, 50_000)
+        eval_interval = min(eval_interval, 10_000)
+        print(
+            f"[eval_policy] fast_dev 模式启用 (mode={EXPERIMENT_MODE}) -> "
+            f"fqe_steps={fqe_steps}, eval_interval={eval_interval}"
+        )
 
     train_cfg = load_training_config(args.model)
     reward_scale = train_cfg.get("reward_scale", 1.0)
@@ -129,8 +147,8 @@ def main() -> None:
         policy,
         train_dataset,
         val_dataset,
-        n_steps=args.fqe_steps,
-        eval_interval=args.eval_interval,
+        n_steps=fqe_steps,
+        eval_interval=eval_interval,
         log_dir=args.log_dir,
         require_gpu=args.require_gpu,
     )

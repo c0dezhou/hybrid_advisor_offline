@@ -52,6 +52,15 @@ N_USERS_TO_SIMULATE = 45000  # 用于模拟的用户数量,生成10000条轨迹
 EPISODE_MAX_STEPS = int(os.getenv("EPISODE_MAX_STEPS", "252"))  # 默认每条轨迹最长252步（一年交易日）
 POLICY_EPS_FIXED = float(os.getenv("POLICY_EPSILON", "0.2"))  # 固定 ε 值，让 20% 的时间随机动作
 POLICY_SEED = 42
+EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "full").lower()
+_FAST_MODE_NAMES = {"fast", "dev"}
+IS_FAST_MODE = EXPERIMENT_MODE in _FAST_MODE_NAMES
+FAST_MODE_USER_CAP = int(os.getenv("FAST_MODE_USER_CAP", "2000"))
+FAST_MODE_STEP_CAP = int(os.getenv("FAST_MODE_STEP_CAP", "64"))
+
+if IS_FAST_MODE:
+    N_USERS_TO_SIMULATE = min(N_USERS_TO_SIMULATE, FAST_MODE_USER_CAP)
+    EPISODE_MAX_STEPS = min(EPISODE_MAX_STEPS, FAST_MODE_STEP_CAP)
 
 FILTER_LOW_RETURN = os.getenv("FILTER_LOW_RETURN", "0") == "1"
 DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
@@ -181,6 +190,10 @@ def generate_offline_dataset():
     这个数据集将用于训练 CQL 算法。
     """
     print("-----开始生成离线数据集-------")
+    print(
+        f"[gen_datasets] mode={EXPERIMENT_MODE}, fast_mode={IS_FAST_MODE}, "
+        f"users={N_USERS_TO_SIMULATE}, max_steps={EPISODE_MAX_STEPS}"
+    )
 
     # 1. 加载用户数据以供采样
     if not os.path.exists(USER_DATA_FILE):
@@ -493,6 +506,13 @@ def main():
     if args.episode_steps is not None:
         EPISODE_MAX_STEPS = max(1, args.episode_steps)
         print(f"使用自定义 episode 步数: {EPISODE_MAX_STEPS}")
+    if IS_FAST_MODE:
+        N_USERS_TO_SIMULATE = min(N_USERS_TO_SIMULATE, FAST_MODE_USER_CAP)
+        EPISODE_MAX_STEPS = min(EPISODE_MAX_STEPS, FAST_MODE_STEP_CAP)
+        print(
+            f"[gen_datasets] fast_dev 限制生效 -> users={N_USERS_TO_SIMULATE}, "
+            f"max_steps={EPISODE_MAX_STEPS}"
+        )
 
     # download_mkt_data()
     generate_offline_dataset()

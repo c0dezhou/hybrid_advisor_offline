@@ -15,6 +15,9 @@ DEFAULT_DATASET_PATH = "./data/offline_dataset.h5"
 DEFAULT_MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
 DATASET_PATH = DEFAULT_DATASET_PATH
 MODEL_SAVE_PATH = DEFAULT_MODEL_SAVE_PATH
+EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "full").lower()
+_FAST_MODE_NAMES = {"fast", "dev"}
+FAST_CQL_STEP_CAP = int(os.getenv("CQL_FAST_STEP_CAP", "200000"))
 
 
 def _model_config_path() -> str:
@@ -26,7 +29,7 @@ ALPHA = float(os.getenv("CQL_ALPHA", "1.0"))
 LEARNING_RATE = float(os.getenv("CQL_LR", "1e-4"))
 N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
 TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "10000"))
-REWARD_SCALE = float(os.getenv("CQL_REWARD_SCALE", "1000.0"))
+REWARD_SCALE = float(os.getenv("CQL_REWARD_SCALE", "300.0"))
 USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
@@ -242,11 +245,17 @@ def _parse_args():
         action="store_true",
         help="禁用 reward scaler，直接使用原始奖励值。",
     )
+    parser.add_argument(
+        "--fast-dev",
+        action="store_true",
+        help="快速实验模式：自动缩短训练步数，方便 sanity check。",
+    )
     return parser.parse_args()
 
 
 def main():
     args = _parse_args()
+    is_fast = args.fast_dev or EXPERIMENT_MODE in _FAST_MODE_NAMES
 
     global DATASET_PATH, MODEL_SAVE_PATH
     if args.dataset:
@@ -288,6 +297,13 @@ def main():
         global USE_REWARD_SCALER
         USE_REWARD_SCALER = False
         print("已禁用 reward scaler，训练将使用原始奖励值。")
+
+    if is_fast:
+        N_STEPS = min(N_STEPS, FAST_CQL_STEP_CAP)
+        print(
+            f"[train_cql] fast_dev 模式启用 (mode={EXPERIMENT_MODE}, "
+            f"cap={FAST_CQL_STEP_CAP}), 实际训练步数: {N_STEPS}"
+        )
 
     try:
         tarin_discrete_cql(require_gpu=args.require_gpu)

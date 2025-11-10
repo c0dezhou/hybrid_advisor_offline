@@ -25,8 +25,11 @@ DEFAULT_MODEL_OUTPUT = "./models/bcq_discrete_model.pt"
 DEFAULT_STEPS = 500_000
 DEFAULT_LR = 1e-4
 DEFAULT_BATCH_SIZE = 256
-DEFAULT_REWARD_SCALE = 1000.0
+DEFAULT_REWARD_SCALE = float(os.getenv("BCQ_REWARD_SCALE", "300.0"))
 STEPS_PER_EPOCH = int(os.getenv("BCQ_STEPS_PER_EPOCH", "5000"))
+EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "full").lower()
+_FAST_MODE_NAMES = {"fast", "dev"}
+FAST_BCQ_STEP_CAP = int(os.getenv("BCQ_FAST_STEP_CAP", "200000"))
 
 
 def _maybe_patch_custom_factories() -> str | None:
@@ -92,6 +95,11 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="若指定，则必须检测到 GPU，否则报错。",
     )
+    parser.add_argument(
+        "--fast-dev",
+        action="store_true",
+        help="快速实验模式：缩短训练步数，方便调参。",
+    )
     return parser.parse_args()
 
 
@@ -135,8 +143,13 @@ def main() -> None:
 
     use_gpu_flag, device_str = _prepare_device(cli_args.require_gpu)
 
+    is_fast = cli_args.fast_dev or EXPERIMENT_MODE in _FAST_MODE_NAMES
+    target_steps = cli_args.steps
+    if is_fast:
+        target_steps = min(target_steps, FAST_BCQ_STEP_CAP)
+
     print("\n--- BCQ 实验管线：开始训练 DiscreteBCQ ---")
-    print(f"训练步数: {cli_args.steps}")
+    print(f"训练步数: {target_steps} (mode={EXPERIMENT_MODE}, fast_dev={cli_args.fast_dev})")
     print(f"学习率: {cli_args.learning_rate}")
     print(f"批大小: {cli_args.batch_size}")
     print(f"奖励缩放: {cli_args.reward_scale}")
@@ -167,8 +180,8 @@ def main() -> None:
 
     bcq_runner.fit(
         replay_buf,
-        n_steps=cli_args.steps,
-        n_steps_per_epoch=min(cli_args.steps, STEPS_PER_EPOCH),
+        n_steps=target_steps,
+        n_steps_per_epoch=min(target_steps, STEPS_PER_EPOCH),
         show_progress=True,
     )
 
@@ -182,7 +195,7 @@ def main() -> None:
     config = {
         "model_type": "DiscreteBCQ",
         "algo_name": "DiscreteBCQ",
-        "steps": cli_args.steps,
+        "steps": target_steps,
         "learning_rate": cli_args.learning_rate,
         "batch_size": cli_args.batch_size,
         "reward_scale": reward_scale_applied,
