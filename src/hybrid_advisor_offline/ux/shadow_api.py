@@ -13,6 +13,7 @@ FastAPI 影子接口：Hybrid Advisor Offline
 from __future__ import annotations
 
 import hashlib
+import os
 from typing import List, Optional
 
 import numpy as np
@@ -36,7 +37,8 @@ from hybrid_advisor_offline.engine.state.state_builder import (
     UserProfile,
     build_state_vec,
 )
-from hybrid_advisor_offline.offline.trainrl.train_cql import load_cql_policy
+from hybrid_advisor_offline.offline.trainrl import train_cql
+from hybrid_advisor_offline.offline.trainrl.train_cql import load_cql_policy_from_paths
 
 
 def _predict_q_values(policy, state_vec: np.ndarray) -> np.ndarray:
@@ -77,6 +79,19 @@ class UserProfileInput(BaseModel):
         return arr.tolist()
 
 
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
+DEMO_DATASET_PATH = os.getenv("DEMO_DATASET_PATH", "./data/offline_dataset_demo.h5")
+DEMO_MODEL_PATH = os.getenv("DEMO_MODEL_PATH", "./models/cql_demo.pt")
+FULL_DATASET_PATH = os.getenv(
+    "STREAMLIT_DATASET_PATH",
+    getattr(train_cql, "DATASET_PATH", "./data/offline_dataset.h5"),
+)
+FULL_MODEL_PATH = os.getenv(
+    "STREAMLIT_MODEL_PATH",
+    getattr(train_cql, "MODEL_SAVE_PATH", "./models/cql_discrete_model.pt"),
+)
+
+
 class RecommendationResponse(BaseModel):
     chosen_card_id: str
     target_alloc: List[float]
@@ -101,10 +116,17 @@ _latest_snapshot: Optional[MarketSnapshot] = None
 def _load_resources():
     global _cql_policy, _latest_snapshot
     try:
-        _cql_policy = load_cql_policy(require_gpu=False)
+        dataset_path = DEMO_DATASET_PATH if DEMO_MODE else FULL_DATASET_PATH
+        model_path = DEMO_MODEL_PATH if DEMO_MODE else FULL_MODEL_PATH
+        _cql_policy = load_cql_policy_from_paths(
+            dataset_path,
+            model_path,
+            require_gpu=False,
+        )
         env = MarketEnv()
         _latest_snapshot = env.mkt_sshots[-1]
-        print("影子接口：模型与市场快照加载成功。")
+        mode = "DEMO" if DEMO_MODE else "FULL"
+        print(f"影子接口：模型与市场快照加载成功（{mode}）。")
     except Exception as exc:  # pragma: no cover - 启动日志
         _cql_policy = None
         _latest_snapshot = None

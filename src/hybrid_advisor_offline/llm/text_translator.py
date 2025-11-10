@@ -267,7 +267,7 @@ def _llm_refine(text: str, context: Dict[str, Any]) -> Tuple[str | None, str]:
         return None, "llm_empty"
     if refined == text.strip():
         return refined, "llm_nochange"
-    return refined, "qwen2-7b-instruct-q5_k_m.gguf"
+    return refined, "llm_refined"
 
 
 def _gguf_refine(text: str, context: Dict[str, Any]) -> Tuple[str | None, str]:

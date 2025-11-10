@@ -66,6 +66,36 @@ def _standard_dataset(dataset: ReplayBuffer):
         rew_stand = None
     return obs_stand, rew_stand
 
+
+def _load_policy_from_artifacts(
+    dataset_path: str,
+    model_path: str,
+    require_gpu: bool,
+) -> DiscreteCQL:
+    if require_gpu:
+        _require_gpu()
+
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"找不到离线数据集：{dataset_path}")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"找不到已训练模型：{model_path}")
+
+    dataset = ReplayBuffer.load(dataset_path, buffer=InfiniteBuffer())
+    obs_scaler, rew_scaler = _standard_dataset(dataset)
+    config = DiscreteCQLConfig(
+        observation_scaler=obs_scaler,
+        reward_scaler=rew_scaler,
+        alpha=ALPHA,
+        learning_rate=LEARNING_RATE,
+        n_critics=N_CRITICS,
+        target_update_interval=TARGET_UPDATE_INTERVAL,
+    )
+    device = 0 if require_gpu else False
+    policy = config.create(device=device)
+    policy.build_with_dataset(dataset)
+    policy.load_model(model_path)
+    return policy
+
 def tarin_discrete_cql(require_gpu: bool):
     """
     使用离线数据集训练离散Conservative Qleaning
@@ -147,32 +177,30 @@ def load_cql_policy(require_gpu: bool = True) -> DiscreteCQL:
     """
     加载已经训练好的离散 CQL 策略。
     """
-    if not os.path.exists(MODEL_SAVE_PATH):
-        raise FileNotFoundError(
-            f"未在 {MODEL_SAVE_PATH} 找到已训练的模型请先 train_discrete_cql.py"
-        )
-
-    if require_gpu:
-        _require_gpu()
-
-    # act_size = get_act_space_size()
-    dataset = ReplayBuffer.load(DATASET_PATH, buffer=InfiniteBuffer())
-    obs_scaler, rew_scaler = _standard_dataset(dataset)
-    config = DiscreteCQLConfig(
-        observation_scaler=obs_scaler,
-        reward_scaler=rew_scaler,
-        alpha=ALPHA,
-        learning_rate=LEARNING_RATE,
-        n_critics=N_CRITICS,
-        target_update_interval=TARGET_UPDATE_INTERVAL,
+    policy = _load_policy_from_artifacts(
+        DATASET_PATH,
+        MODEL_SAVE_PATH,
+        require_gpu=require_gpu,
     )
-    device = 0 if require_gpu else False
-    policy = config.create(device=device)
-    policy.build_with_dataset(dataset)
-    policy.load_model(MODEL_SAVE_PATH)
-
     print(f"已从 {MODEL_SAVE_PATH} 成功加载 CQL 策略")
-    return policy    
+    return policy
+
+
+def load_cql_policy_from_paths(
+    dataset_path: str,
+    model_path: str,
+    require_gpu: bool = True,
+) -> DiscreteCQL:
+    """
+    加载指定路径下的 CQL 模型，供 demo / 推理使用。
+    """
+    policy = _load_policy_from_artifacts(
+        dataset_path,
+        model_path,
+        require_gpu=require_gpu,
+    )
+    print(f"已从 {model_path} 成功加载 CQL 策略")
+    return policy
 
 
 def _parse_args():

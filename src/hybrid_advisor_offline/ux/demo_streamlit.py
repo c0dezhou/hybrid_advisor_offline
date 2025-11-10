@@ -9,7 +9,7 @@ Streamlit 演示应用：Hybrid Advisor Offline
 4. 输出可复制的审计摘要，便于审计追溯。
 
 运行方式
-    streamlit run -m hybrid_advisor_offline.ux.demo_streamlit
+    python -m streamlit run hybrid_advisor_offline/ux/demo_streamlit.py
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict
+import os
 from pathlib import Path
 from typing import Dict, List
 
@@ -42,11 +43,25 @@ from hybrid_advisor_offline.engine.state.state_builder import (
     build_state_vec,
 )
 from hybrid_advisor_offline.offline.analysis.segment_metrics import plot_segment_bars
-from hybrid_advisor_offline.offline.trainrl.train_cql import load_cql_policy
+from hybrid_advisor_offline.offline.trainrl import train_cql
+from hybrid_advisor_offline.offline.trainrl.train_cql import (
+    load_cql_policy_from_paths,
+)
 
 PAGE_ICON = "🧭"
 TOP_K = 3
 REPORTS_DIR = Path("./reports")
+DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
+DEMO_DATASET_PATH = os.getenv("DEMO_DATASET_PATH", "./data/offline_dataset_demo.h5")
+DEMO_MODEL_PATH = os.getenv("DEMO_MODEL_PATH", "./models/cql_demo.pt")
+FULL_DATASET_PATH = os.getenv(
+    "STREAMLIT_DATASET_PATH",
+    getattr(train_cql, "DATASET_PATH", "./data/offline_dataset.h5"),
+)
+FULL_MODEL_PATH = os.getenv(
+    "STREAMLIT_MODEL_PATH",
+    getattr(train_cql, "MODEL_SAVE_PATH", "./models/cql_discrete_model.pt"),
+)
 
 
 def _predict_q_values(policy, state_vec: np.ndarray) -> np.ndarray:
@@ -57,10 +72,18 @@ def _predict_q_values(policy, state_vec: np.ndarray) -> np.ndarray:
 
 
 @st.cache_resource(show_spinner=False)
-def load_resources():
+def load_resources(
+    demo_mode: bool,
+    dataset_path: str,
+    model_path: str,
+):
     """加载 CQL 策略与最新市场快照；失败时返回 (None, None)。"""
     try:
-        policy = load_cql_policy(require_gpu=False)
+        policy = load_cql_policy_from_paths(
+            dataset_path,
+            model_path,
+            require_gpu=False,
+        )
         env = MarketEnv()
         latest_snapshot: MarketSnapshot = env.mkt_sshots[-1]
         return policy, latest_snapshot
@@ -267,7 +290,9 @@ def main():
         "离线 CQL 模型 + 合规安全壳。输入客户画像后即可查看推荐卡片、Q 值与审计摘要。"
     )
 
-    policy, snapshot = load_resources()
+    active_dataset = DEMO_DATASET_PATH if DEMO_MODE else FULL_DATASET_PATH
+    active_model = DEMO_MODEL_PATH if DEMO_MODE else FULL_MODEL_PATH
+    policy, snapshot = load_resources(DEMO_MODE, active_dataset, active_model)
     if policy is None or snapshot is None:
         st.stop()
 
@@ -278,6 +303,11 @@ def main():
         col_left, col_right = st.columns([0.35, 0.65], gap="large")
         with col_left:
             st.subheader("安全壳&状态总览")
+            if DEMO_MODE:
+                st.info(
+                    "Demo 模式：使用轻量小模型，仅用于快速展示。",
+                    icon="⚡",
+                )
             st.metric("风险等级 (0=保守,2=进取)", inputs["profile"].risk_bucket)
             st.metric(
                 "当前配置",
