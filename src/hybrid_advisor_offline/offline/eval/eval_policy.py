@@ -13,6 +13,9 @@ import json
 import os
 from typing import Any, Dict
 
+import numpy as np
+import pandas as pd
+
 from hybrid_advisor_offline.offline.eval.fqe_data import (
     DATASET_PATH_DEFAULT,
     load_replay_buffer,
@@ -110,6 +113,111 @@ def parse_args():
     return parser.parse_args()
 
 
+def _compute_equity_and_max_drawdown(step_returns: np.ndarray) -> tuple[float, float]:
+    """
+    根据一条 episode 的逐步收益序列计算累计收益和最大回撤。
+
+    说明：由于训练 reward 现已仅由 market_return（+可选客户接受度）构成，
+    这里直接把 reward 视作“近似收益”，用来恢复净值曲线。
+    """
+    if step_returns.size == 0:
+        return 0.0, 0.0
+
+    step_returns = step_returns.astype(np.float64)
+    equity = np.cumprod(np.clip(1.0 + step_returns, 1e-6, None))
+    peaks = np.maximum.accumulate(equity)
+    drawdowns = equity / np.clip(peaks, 1e-6, None) - 1.0
+    max_dd = float(drawdowns.min())
+    total_return = float(equity[-1] - 1.0)
+    return total_return, max_dd
+
+
+def _infer_risk_bucket(profile_dict: Dict[str, Any]) -> int | None:
+    """复用 UserProfile.risk_bucket 的年龄分档逻辑。"""
+    age = profile_dict.get("age")
+    try:
+        age = int(age)
+    except (TypeError, ValueError):
+        return None
+    if age > 55:
+        return 0
+    if age > 35:
+        return 1
+    return 2
+
+
+def _collect_episode_metrics(
+    replay_buffer,
+    behavior_meta_path: str | None,
+) -> pd.DataFrame:
+    episodes = list(replay_buffer.episodes)
+    if not episodes:
+        return pd.DataFrame(
+            columns=["episode_id", "total_return", "max_drawdown", "risk_bucket"]
+        )
+
+    profiles: list[dict[str, Any]] | None = None
+    if behavior_meta_path and os.path.exists(behavior_meta_path):
+        meta = np.load(behavior_meta_path, allow_pickle=True)
+        meta_profiles = meta.get("user_profiles")
+        if meta_profiles is not None:
+            profiles = []
+            for item in meta_profiles:
+                if isinstance(item, dict):
+                    profiles.append(item)
+                    continue
+                try:
+                    obj = item.item()
+                    if isinstance(obj, dict):
+                        profiles.append(obj)
+                        continue
+                except Exception:
+                    pass
+                try:
+                    profiles.append(dict(item))
+                except Exception:
+                    profiles.append({})
+
+    rows: list[dict[str, Any]] = []
+    for ep_id, episode in enumerate(episodes):
+        step_returns = np.asarray(episode.rewards, dtype=np.float64).reshape(-1)
+        total_ret, max_dd = _compute_equity_and_max_drawdown(step_returns)
+        risk_bucket = None
+        if profiles is not None and ep_id < len(profiles):
+            risk_bucket = _infer_risk_bucket(profiles[ep_id])
+        rows.append(
+            {
+                "episode_id": ep_id,
+                "total_return": total_ret,
+                "max_drawdown": max_dd,
+                "risk_bucket": risk_bucket,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _build_risk_metrics(df: pd.DataFrame) -> Dict[str, Any]:
+    if df.empty:
+        return {"overall": {"n_episodes": 0}}
+
+    def _agg(frame: pd.DataFrame) -> Dict[str, float]:
+        return {
+            "n_episodes": int(len(frame)),
+            "avg_total_return": float(frame["total_return"].mean()),
+            "avg_max_drawdown": float(frame["max_drawdown"].mean()),
+        }
+
+    metrics: Dict[str, Any] = {"overall": _agg(df)}
+
+    if "risk_bucket" in df.columns:
+        by_bucket: Dict[str, Any] = {}
+        for bucket, group in df.dropna(subset=["risk_bucket"]).groupby("risk_bucket"):
+            by_bucket[str(int(bucket))] = _agg(group)
+        if by_bucket:
+            metrics["by_risk_bucket"] = by_bucket
+    return metrics
+
+
 def main() -> None:
     args = parse_args()
 
@@ -169,6 +277,10 @@ def main() -> None:
         "fqe": fqe_metrics,
         "cpe": cpe_metrics,
     }
+
+    print("--- 统计 episode 风险指标（max drawdown） ---")
+    episode_df = _collect_episode_metrics(replay_buffer, behavior_meta_path)
+    summary["risk_metrics"] = _build_risk_metrics(episode_df)
 
     print("\n=== 评估结果 ===")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

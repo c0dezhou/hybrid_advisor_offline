@@ -88,7 +88,11 @@ def test_load_cql_policy_builds(monkeypatch, tmp_path):
     monkeypatch.setattr(train_cql, "_require_gpu", lambda: None)
     monkeypatch.setattr(train_cql, "ReplayBuffer", DummyReplayBuffer)
     monkeypatch.setattr(train_cql, "InfiniteBuffer", lambda: "buf")
-    monkeypatch.setattr(train_cql, "_standard_dataset", lambda dataset: ("obs", "rew"))
+    monkeypatch.setattr(
+        train_cql,
+        "_standard_dataset",
+        lambda dataset, use_reward_scaler: ("obs", "rew"),
+    )
     monkeypatch.setattr(train_cql, "DiscreteCQLConfig", DummyConfig)
 
     policy = train_cql.load_cql_policy(require_gpu=False)

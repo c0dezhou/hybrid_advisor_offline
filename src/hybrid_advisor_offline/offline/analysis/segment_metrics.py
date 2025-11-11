@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, fields as dataclass_fields
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -24,6 +24,9 @@ class EpisodeSnapshot:
     total_reward: float
     length: int
     estimate: Optional[float] = None
+
+
+_USER_PROFILE_FIELDS = {f.name for f in dataclass_fields(UserProfile)}
 
 
 def _ensure_dir(path: Path) -> None:
@@ -82,7 +85,13 @@ def _npz_to_profiles(meta_path: str) -> List[UserProfile]:
                 candidate = candidate.item()
             if isinstance(candidate, (bytes, str)):
                 candidate = json.loads(candidate)
-            profiles.append(UserProfile(**dict(candidate)))
+            candidate_dict = dict(candidate)
+            filtered = {
+                key: candidate_dict[key]
+                for key in _USER_PROFILE_FIELDS
+                if key in candidate_dict
+            }
+            profiles.append(UserProfile(**filtered))
     return profiles
 
 
@@ -130,7 +139,10 @@ def _estimate_episode_value(policy, episode) -> float:
     if obs.size == 0:
         return 0.0
     greedy_actions = policy.predict(obs)
-    q_values = policy.predict_value(obs, greedy_actions)
+    try:
+        q_values = policy.predict_value(obs, greedy_actions)
+    except NotImplementedError:
+        return 0.0
     if q_values.size == 0:
         return 0.0
     return float(q_values[0])

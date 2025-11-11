@@ -67,7 +67,10 @@ def train_demo_cql(
 
     dataset = ReplayBuffer.load(dataset_path, buffer=InfiniteBuffer())
     apply_reward_scale(dataset, reward_scale)
-    obs_scaler, rew_scaler = _standard_dataset(dataset)
+    obs_scaler, rew_scaler = _standard_dataset(
+        dataset,
+        use_reward_scaler=USE_REWARD_SCALER,
+    )
 
     episodes = list(dataset.episodes)
     if not episodes:

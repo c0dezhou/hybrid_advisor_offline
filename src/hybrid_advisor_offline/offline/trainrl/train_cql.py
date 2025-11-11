@@ -4,12 +4,12 @@ from d3rlpy.algos import DiscreteCQL, DiscreteCQLConfig
 from d3rlpy.dataset import ReplayBuffer, create_infinite_replay_buffer
 from d3rlpy.dataset.buffers import InfiniteBuffer
 from d3rlpy.preprocessing.observation_scalers import StandardObservationScaler
-from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
 from d3rlpy.logging import FileAdapterFactory
 from sklearn.model_selection import train_test_split
 
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
 from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
+from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
 
 DEFAULT_DATASET_PATH = "./data/offline_dataset.h5"
 DEFAULT_MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
@@ -29,7 +29,7 @@ ALPHA = float(os.getenv("CQL_ALPHA", "1.0"))
 LEARNING_RATE = float(os.getenv("CQL_LR", "1e-4"))
 N_CRITICS = int(os.getenv("CQL_N_CRITICS", "2"))
 TARGET_UPDATE_INTERVAL = int(os.getenv("CQL_TARGET_UPDATE", "10000"))
-REWARD_SCALE = float(os.getenv("CQL_REWARD_SCALE", "300.0"))
+REWARD_SCALE = float(os.getenv("CQL_REWARD_SCALE", "1000.0"))
 USE_REWARD_SCALER = os.getenv("CQL_USE_REWARD_SCALER", "1") != "0"
 
 def _require_gpu():
@@ -53,18 +53,44 @@ def _require_gpu():
     print(f"已检测到GPU:{device_name}(设备号：{device_idx})")
 
 
-def _standard_dataset(dataset: ReplayBuffer):
+def _standard_dataset(
+    dataset: ReplayBuffer,
+    *,
+    use_reward_scaler: bool,
+):
     """
     将数据集标准化，主要是对state和reward（归一化到均值为0，方差为1）
     """
     obs_stand = StandardObservationScaler()
     obs_stand.fit_with_transition_picker(dataset.episodes, dataset.transition_picker)
-    if USE_REWARD_SCALER:
+    if use_reward_scaler:
         rew_stand = StandardRewardScaler()
         rew_stand.fit_with_transition_picker(dataset.episodes, dataset.transition_picker)
     else:
         rew_stand = None
     return obs_stand, rew_stand
+
+
+def _load_saved_config(model_path: str) -> dict:
+    """
+    读取紧邻模型权重的 config json，便于推理阶段复用训练超参。
+    """
+    candidates = [
+        f"{model_path}.config.json",
+        model_path.replace(".pt", ".config.json"),
+    ]
+    for cfg_path in candidates:
+        if not os.path.exists(cfg_path):
+            continue
+        try:
+            import json
+
+            with open(cfg_path, "r", encoding="utf-8") as cfg_file:
+                return json.load(cfg_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"警告：读取模型配置 {cfg_path} 失败：{exc}", file=sys.stderr)
+            return {}
+    return {}
 
 
 def _load_policy_from_artifacts(
@@ -80,8 +106,16 @@ def _load_policy_from_artifacts(
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"找不到已训练模型：{model_path}")
 
+    saved_cfg = _load_saved_config(model_path)
+    cfg_reward_scale = float(saved_cfg.get("reward_scale", REWARD_SCALE))
+    cfg_use_reward_scaler = bool(saved_cfg.get("use_reward_scaler", USE_REWARD_SCALER))
+
     dataset = ReplayBuffer.load(dataset_path, buffer=InfiniteBuffer())
-    obs_scaler, rew_scaler = _standard_dataset(dataset)
+    apply_reward_scale(dataset, cfg_reward_scale)
+    obs_scaler, rew_scaler = _standard_dataset(
+        dataset,
+        use_reward_scaler=cfg_use_reward_scaler,
+    )
     config = DiscreteCQLConfig(
         observation_scaler=obs_scaler,
         reward_scaler=rew_scaler,
@@ -111,7 +145,10 @@ def tarin_discrete_cql(require_gpu: bool):
         )
     dataset = ReplayBuffer.load(DATASET_PATH, buffer=InfiniteBuffer())
     apply_reward_scale(dataset, REWARD_SCALE)
-    obs_stand, rew_stand = _standard_dataset(dataset)
+    obs_stand, rew_stand = _standard_dataset(
+        dataset,
+        use_reward_scaler=USE_REWARD_SCALER,
+    )
 
     episo = list(dataset.episodes)
     train_episo, test_episo = train_test_split(episo, test_size=0.2, random_state=42)
@@ -151,6 +188,8 @@ def tarin_discrete_cql(require_gpu: bool):
     os.makedirs(model_dir, exist_ok=True)
     cql.save_model(MODEL_SAVE_PATH)
     config_payload = {
+        "model_type": "DiscreteCQL",
+        "algo_name": "DiscreteCQL",
         "alpha": ALPHA,
         "learning_rate": LEARNING_RATE,
         "n_critics": N_CRITICS,
@@ -158,6 +197,7 @@ def tarin_discrete_cql(require_gpu: bool):
         "n_steps_per_epoch": N_STEPS_PER_EPOCH,
         "reward_scale": REWARD_SCALE,
         "use_reward_scaler": USE_REWARD_SCALER,
+        "dataset_path": DATASET_PATH,
     }
     try:
         import json

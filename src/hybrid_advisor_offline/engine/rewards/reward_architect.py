@@ -18,7 +18,7 @@ def _get_weight(name: str, default: float) -> float:
 # reward 各维权重，可通过环境变量微调，方便实验切换
 W_MKT_RETURN = _get_weight("W_MKT_RETURN", 1.0)
 W_USER_ACCEPT = _get_weight("W_USER_ACCEPT", 0.0)
-# V2.2.x: 调低回撤惩罚强度，避免 reward 全线变成巨量负值
+# V2.2.x: 旧版留存参数，目前 reward 已不直接扣回撤，相关权重仅用于日志/评估参考
 W_DRAWDOWN_PENALTY = _get_weight("W_DRAWDOWN_PENALTY", 0.1)
 MAX_DRAWDOWN_FOR_PENALTY = _get_weight("MAX_DRAWDOWN_FOR_PENALTY", 0.2)
 USE_PERSONAL_RISK_IN_REWARD = int(os.getenv("USE_PERSONAL_RISK_IN_REWARD", "1"))
@@ -103,43 +103,33 @@ def compute_reward(
     accept_prob: float | None = None,
 ):
     """
-    计算 reward 的核心入口。
-    - market_return：市场收益，越大越好；
-    - drawdown：最大回撤，只罚正数；
-    - user_profile：用于读取 risk aversion（只有个性化 reward 打开时才使用）；
-    - accept_prob：预先算好的“客户接受概率”，可重复利用，避免每步跑模型。
+    计算 reward 的核心入口（V2）。
+
+    设计决策：训练阶段的 reward 仅依赖市场收益和可选的客户接受概率。
+    回撤 / 风险厌恶等风险指标改为在评估阶段统计，避免 reward 因惩罚项
+    过大而失真，导致离线 RL 收敛困难。
     """
     if accept_prob is None:
         accept_prob = get_accept_prob(user_profile)
 
-    eff_drawdown = max(drawdown, 0.0)
-    if MAX_DRAWDOWN_FOR_PENALTY > 0.0:
-        # V2.2.x: 只按限定最大回撤惩罚，超出部分不再继续线性放大
-        eff_drawdown = min(eff_drawdown, MAX_DRAWDOWN_FOR_PENALTY)
-
-    penalty = W_DRAWDOWN_PENALTY * eff_drawdown
     active_mode = "personal" if USE_PERSONAL_RISK_IN_REWARD else "uniform"
-    if USE_PERSONAL_RISK_IN_REWARD:
-        risk_aversion = compute_risk_aversion(user_profile)
-        penalty *= risk_aversion
-        applied_ra = risk_aversion
-    else:
-        # 统一 reward 模式下使用固定系数，避免每次都去加载用户画像
-        penalty *= UNIFORM_RA_FACTOR
-        applied_ra = UNIFORM_RA_FACTOR
+    applied_ra = (
+        compute_risk_aversion(user_profile)
+        if USE_PERSONAL_RISK_IN_REWARD
+        else UNIFORM_RA_FACTOR
+    )
 
     total_reward = (
         W_MKT_RETURN * market_return +
-        W_USER_ACCEPT * accept_prob -
-        penalty  # drawdown>0 时生效
+        W_USER_ACCEPT * accept_prob
     )
-    _maybe_log_reward(market_return, eff_drawdown, applied_ra, total_reward, active_mode)
-    return total_reward
+    _maybe_log_reward(market_return, drawdown, applied_ra, total_reward, active_mode)
+    return float(total_reward)
 
 
 def _maybe_log_reward(
     market_return: float,
-    eff_drawdown: float,
+    drawdown: float,
     risk_aversion: float,
     total_reward: float,
     mode: str,
@@ -150,7 +140,7 @@ def _maybe_log_reward(
     print(
         f"[reward_debug] mode={mode} "
         f"market_return={market_return:.6f} "
-        f"eff_drawdown={eff_drawdown:.6f} "
+        f"drawdown={drawdown:.6f} "
         f"risk_aversion={risk_aversion:.3f} "
         f"reward={total_reward:.6f}"
     )
