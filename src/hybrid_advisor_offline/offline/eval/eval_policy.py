@@ -110,6 +110,12 @@ def parse_args():
         action="store_true",
         help="快速实验模式：缩短 FQE 步数和评估间隔。",
     )
+    parser.add_argument(
+        "--summary-output",
+        type=str,
+        default=None,
+        help="若提供路径，则把最终评估 JSON 另存为文件，方便交付。",
+    )
     return parser.parse_args()
 
 
@@ -278,64 +284,92 @@ def main() -> None:
         eval_interval = min(eval_interval, 10_000)
         print(
             f"[eval_policy] fast_dev 模式启用 (mode={EXPERIMENT_MODE}) -> "
-            f"fqe_steps={fqe_steps}, eval_interval={eval_interval}"
+            f"FQE 步数={fqe_steps}，评估间隔={eval_interval}"
         )
 
     behavior_meta_path = _behavior_meta_path(args.dataset, args.behavior_meta)
     behavior_profiles = _load_behavior_profiles(behavior_meta_path)
+    random_baseline_supported = False
+    random_baseline_reason = "behavior meta unavailable"
     if behavior_meta_path and os.path.exists(behavior_meta_path):
         with np.load(behavior_meta_path, allow_pickle=True) as meta_tmp:
             has_action_sources = "action_sources" in meta_tmp.files
+            allowed_counts = meta_tmp.get("allowed_action_counts")
         if has_action_sources:
-            print("[eval_policy] behavior meta contains action_sources; risk_metrics can be grouped by source.")
+            print("[eval_policy] 检测到 action_sources，可按来源分组风险指标。")
         else:
-            print("[eval_policy] behavior meta missing action_sources; skip by_action_source grouping.")
+            print("[eval_policy] 行为 meta 缺少 action_sources，跳过按来源分组。")
+        if allowed_counts is None:
+            random_baseline_reason = "allowed_action_counts missing"
+            print("[eval_policy] 警告：行为 meta 缺少 allowed_action_counts，随机基线加权跳过。")
+        else:
+            counts_array = np.asarray(allowed_counts, dtype=np.int32)
+            if counts_array.size == 0 or np.all(counts_array <= 0):
+                random_baseline_reason = "allowed_action_counts empty_or_nonpositive"
+                print("[eval_policy] 警告：allowed_action_counts 为空或非正数，随机基线退化，忽略加权。")
+            else:
+                random_baseline_supported = True
+                random_baseline_reason = "ok"
+    else:
+        print("[eval_policy] 行为 meta 不存在，无法检查 action_sources 与 allowed_action_counts。")
 
-    train_cfg = load_training_config(args.model)
-    reward_scale = train_cfg.get("reward_scale", 1.0)
+    model_path = args.model.strip()
+    if model_path:
+        train_cfg = load_training_config(model_path)
+        reward_scale = train_cfg.get("reward_scale", 1.0)
+    else:
+        train_cfg = {}
+        reward_scale = 1.0
 
-    print(f"[eval_policy] reward_scale(train_config)={reward_scale}")
+    print(f"[eval_policy] 训练配置中 reward_scale={reward_scale}")
 
     replay_buffer = load_replay_buffer(args.dataset, reward_scale=reward_scale)
     applied_scale = getattr(replay_buffer, "_reward_scale_applied", None)
-    print(f"[eval_policy] reward_scale_applied(buffer)={applied_scale}")
+    print(f"[eval_policy] 数据集 reward_scale_applied={applied_scale}")
     if replay_buffer.episodes:
         sample_rewards = np.asarray(replay_buffer.episodes[0].rewards, dtype=np.float64)
         if sample_rewards.size:
             print(
-                "[eval_policy] sample_reward_stats",
-                f"min={sample_rewards.min():.6f}",
-                f"max={sample_rewards.max():.6f}",
-                f"mean={sample_rewards.mean():.6f}",
+                "[eval_policy] 样本奖励统计",
+                f"最小={sample_rewards.min():.6f}",
+                f"最大={sample_rewards.max():.6f}",
+                f"均值={sample_rewards.mean():.6f}",
             )
     if behavior_profiles is None:
-        print("[eval_policy] behavior meta lacks user_profiles; risk buckets per episode will be empty.")
+        print("[eval_policy] 行为 meta 缺少 user_profiles，分桶风险会丢失。")
 
     episode_bucket_map = _build_episode_bucket_map(
         behavior_profiles,
         len(replay_buffer.episodes),
     )
-    policy = load_trained_policy(
-        args.model,
-        replay_buffer,
-        require_gpu=args.require_gpu,
-    )
+    policy = None
+    if model_path:
+        policy = load_trained_policy(
+            model_path,
+            replay_buffer,
+            require_gpu=args.require_gpu,
+        )
 
     train_dataset, val_dataset = prepare_fqe_datasets(
         replay_buffer,
         validation_ratio=args.validation_ratio,
     )
 
-    print("--- 运行 Fitted Q Evaluation (FQE) ---")
-    fqe_metrics, fqe_model = run_fqe(
-        policy,
-        train_dataset,
-        val_dataset,
-        n_steps=fqe_steps,
-        eval_interval=eval_interval,
-        log_dir=args.log_dir,
-        require_gpu=args.require_gpu,
-    )
+    fqe_metrics: Dict[str, Any] = {}
+    fqe_model = None
+    if policy is not None:
+        print("--- 运行 Fitted Q Evaluation (FQE) ---")
+        fqe_metrics, fqe_model = run_fqe(
+            policy,
+            train_dataset,
+            val_dataset,
+            n_steps=fqe_steps,
+            eval_interval=eval_interval,
+            log_dir=args.log_dir,
+            require_gpu=args.require_gpu,
+        )
+    else:
+        print("[eval_policy] 未提供模型，跳过 FQE 评估。")
 
     fqe_by_bucket = _compute_fqe_by_bucket(fqe_model, replay_buffer, episode_bucket_map)
     cpe_metrics: Dict[str, Any] = {}
@@ -354,6 +388,16 @@ def main() -> None:
         "fqe": fqe_metrics,
         "cpe": cpe_metrics,
     }
+    random_baseline_supported = "random_baseline_ips" in cpe_metrics
+    summary["cpe_flags"] = cpe_metrics.get("cpe_flags")
+    summary["random_baseline"] = {"supported": random_baseline_supported}
+    if random_baseline_supported:
+        summary["random_baseline"]["metrics"] = {
+            "ips": cpe_metrics.get("random_baseline_ips"),
+            "snips": cpe_metrics.get("random_baseline_snips"),
+        }
+    else:
+        summary["random_baseline"]["reason"] = random_baseline_reason
     if fqe_by_bucket:
         summary["fqe_by_risk_bucket"] = fqe_by_bucket
 
@@ -366,7 +410,16 @@ def main() -> None:
     summary["risk_metrics"] = _build_risk_metrics(episode_df)
 
     print("\n=== 评估结果 ===")
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    summary_text = json.dumps(summary, ensure_ascii=False, indent=2)
+    print(summary_text)
+    if args.summary_output:
+        out_path = args.summary_output
+        out_dir = os.path.dirname(out_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(out_path, "w", encoding="utf-8") as fp:
+            fp.write(summary_text)
+        print(f"[eval_policy] 评估摘要已写入 {out_path}")
 
 
 if __name__ == "__main__":

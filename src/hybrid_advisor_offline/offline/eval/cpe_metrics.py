@@ -39,6 +39,9 @@ class BehaviorMetadata:
     propensities: np.ndarray
     actions: Optional[np.ndarray] = None
     episode_ids: Optional[np.ndarray] = None
+    allowed_action_counts: Optional[np.ndarray] = None
+    behavior_propensities: Optional[np.ndarray] = None
+    target_action_probs: Optional[np.ndarray] = None
 
     @property
     def size(self) -> int:
@@ -60,39 +63,70 @@ def load_behavior_metadata(path: Optional[str]) -> Optional[BehaviorMetadata]:
         return None
     actions = data.get("actions")
     episode_ids = data.get("episode_ids")
+    allowed_action_counts = data.get("allowed_action_counts")
+    behavior_propensities = data.get("behavior_propensity")
+    target_action_probs = data.get("target_action_probs")
     return BehaviorMetadata(
         propensities=prop,
         actions=np.asarray(actions) if actions is not None else None,
         episode_ids=np.asarray(episode_ids) if episode_ids is not None else None,
+        allowed_action_counts=np.asarray(
+            allowed_action_counts
+        ) if allowed_action_counts is not None else None,
+        behavior_propensities=np.asarray(
+            behavior_propensities
+        ) if behavior_propensities is not None else None,
+        target_action_probs=np.asarray(
+            target_action_probs
+        ) if target_action_probs is not None else None,
     )
 
 
-def collect_cpe_samples(buffer: ReplayBuffer, behavior_meta: Optional[BehaviorMetadata]):
+def collect_cpe_samples(
+    buffer: ReplayBuffer, behavior_meta: Optional[BehaviorMetadata]
+) -> Tuple[List[CPESample], Optional[np.ndarray], Optional[np.ndarray], bool]:
     """从 ReplayBuffer 中提取奖励与 propensity。"""
     samples: List[CPESample] = []
-    propensities = None
+    behavior_propensities = None
     total_steps = sum(ep.transition_count for ep in buffer.episodes)
+    use_propensity = False
     if behavior_meta is not None:
-        if behavior_meta.size == total_steps:
-            propensities = behavior_meta.propensities
+        if behavior_meta.size == total_steps and behavior_meta.behavior_propensities is not None:
+            behavior_propensities = behavior_meta.behavior_propensities
+            use_propensity = True
         else:
             logger.warning(
-                "行为策略倾向数量(%d)与轨迹步数(%d)不一致，回退为 1.0。",
+                "行为策略倾向数量(%d)与轨迹步数(%d)不一致或缺失，回退为 1.0。",
                 behavior_meta.size,
                 total_steps,
             )
-
     idx = 0
     for episode in buffer.episodes:
         rewards = np.asarray(episode.rewards, dtype=np.float32).reshape(-1)
         for reward in rewards:
-            if propensities is None:
-                propensity = 1.0
-            else:
-                propensity = float(propensities[idx])
-            samples.append(CPESample(reward=float(reward), propensity=max(propensity, 1e-6)))
+            propensity = (
+                float(behavior_propensities[idx])
+                if use_propensity
+                else 1.0
+            )
+            samples.append(
+                CPESample(reward=float(reward), propensity=max(propensity, 1e-6))
+            )
             idx += 1
-    return samples
+    counts = (
+        behavior_meta.allowed_action_counts
+        if behavior_meta is not None
+        else None
+    )
+    target_probs = None
+    if counts is not None:
+        counts_arr = np.asarray(counts, dtype=np.float32)
+        mask = counts_arr > 0
+        target_probs = np.zeros_like(counts_arr, dtype=np.float32)
+        target_probs[mask] = 1.0 / counts_arr[mask]
+    return samples, target_probs, (
+        behavior_meta if use_propensity else None
+    ), use_propensity
 
 
 def ips(samples: Iterable[CPESample]):
@@ -114,6 +148,32 @@ def snips(samples: Iterable[CPESample]):
     return sum(w * s.reward for w, s in zip(weights, sample_list)) / total_w
 
 
+def _compute_random_baseline_metrics(
+    samples: Iterable[CPESample], target_probs: Optional[np.ndarray]
+) -> Dict[str, float]:
+    if target_probs is None:
+        return {}
+    rewards = np.array([s.reward for s in samples], dtype=np.float32)
+    propensities = np.array([s.propensity for s in samples], dtype=np.float32)
+    if rewards.size != target_probs.size:
+        return {}
+    weights = np.divide(
+        target_probs,
+        propensities,
+        out=np.zeros_like(target_probs, dtype=np.float32),
+        where=propensities > 0,
+    )
+    total_w = float(np.sum(weights))
+    if total_w == 0.0:
+        return {}
+    ips_value = float(np.sum(weights * rewards) / total_w)
+    snips_value = ips_value
+    return {
+        "random_baseline_ips": ips_value,
+        "random_baseline_snips": snips_value,
+    }
+
+
 def mean_episode_return(buffer: ReplayBuffer):
     """计算数据集中所有轨迹的平均总回报"""
     returns = []
@@ -130,7 +190,9 @@ def compute_cpe_report(buffer: ReplayBuffer, behavior_meta_path: Optional[str] =
     计算离线日志上的 IPS / SNIPS / 平均回报等指标。
     """
     behavior_meta = load_behavior_metadata(behavior_meta_path)
-    samples = collect_cpe_samples(buffer, behavior_meta)
+    samples, target_probs, behavior_meta_resolved, used_propensity = collect_cpe_samples(
+        buffer, behavior_meta
+    )
     if not samples:
         logger.warning("CPE 样本为空，返回 0 指标。")
         return {"episode_return_mean": 0.0, "ips": 0.0, "snips": 0.0}
@@ -142,8 +204,17 @@ def compute_cpe_report(buffer: ReplayBuffer, behavior_meta_path: Optional[str] =
             "propensity 信息缺失，默认为 1.0 —— 结果等价于 on-policy 平均。"
         )
 
-    return {
+    flags = {
+        "used_behavior_propensity": bool(used_propensity),
+        "target_policy": "random_uniform_over_allowed",
+        "fallback_to_mean": not used_propensity,
+    }
+    metrics = {
         "episode_return_mean": mean_episode_return(buffer),
         "ips": ips(samples),
         "snips": snips(samples),
     }
+    if target_probs is not None:
+        metrics.update(_compute_random_baseline_metrics(samples, target_probs))
+    metrics["cpe_flags"] = flags
+    return metrics

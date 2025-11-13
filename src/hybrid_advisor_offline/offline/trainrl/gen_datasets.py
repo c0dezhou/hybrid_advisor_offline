@@ -32,7 +32,11 @@ from hybrid_advisor_offline.engine.rewards.reward_architect import (
 )
 from hybrid_advisor_offline.engine.act_safety.act_filter import allowed_cards_for_user
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
-from hybrid_advisor_offline.engine.policy.policy_based_rule import policy_based_rule
+from hybrid_advisor_offline.engine.policy.policy_based_rule import (
+    ACTION_SOURCE_EPSILON,
+    ACTION_SOURCE_GREEDY,
+    policy_based_rule,
+)
 
 
 DATA_DIR = "./data"
@@ -80,6 +84,7 @@ FILTER_LOW_RETURN = os.getenv("FILTER_LOW_RETURN", "0") == "1"
 DATASET_KEEP_TOP_FRAC = float(os.getenv("DATASET_KEEP_TOP_FRAC", "1.0"))  # 保留回报 top 比例
 _min_return_env = os.getenv("DATASET_MIN_RETURN", "").strip()
 DATASET_MIN_RETURN = float(_min_return_env) if _min_return_env else None  # 默认不过滤
+DATASET_SPLIT_NAME = os.getenv("DATASET_SPLIT_NAME", "")
 
 
 def _profile_to_meta(profile: UserProfile) -> dict:
@@ -257,6 +262,8 @@ def generate_offline_dataset():
     rwds_mem = _alloc_mm("rews", (max_steps,), np.float32)
     dones_mem = _alloc_mm("dones", (max_steps,), np.float32)
     prop_mem = _alloc_mm("props", (max_steps,), np.float32)
+    action_sources_mem = _alloc_mm("action_sources", (max_steps,), np.int8)
+    allowed_counts_mem = _alloc_mm("allowed_counts", (max_steps,), np.int16)
     episode_ids_mem = _alloc_mm("episode_ids", (max_steps,), np.int32)
 
     rng = np.random.default_rng(POLICY_SEED)
@@ -289,7 +296,7 @@ def generate_offline_dataset():
                 user_vector=user_vector
             )
 
-            action_id, _, propensity = policy_based_rule(
+            action_id, _, propensity, action_source = policy_based_rule(
                 state_vec,
                 allowed_cards,
                 user_profile.risk_bucket,
@@ -319,6 +326,8 @@ def generate_offline_dataset():
             rwds_mem[row_ptr] = reward
             dones_mem[row_ptr] = 1.0 if done else 0.0
             prop_mem[row_ptr] = float(propensity)
+            action_sources_mem[row_ptr] = np.int8(action_source)
+            allowed_counts_mem[row_ptr] = np.int16(len(allowed_cards))
             episode_ids_mem[row_ptr] = ep_id_counter
             row_ptr += 1
 
@@ -370,7 +379,25 @@ def generate_offline_dataset():
     rwds_array = rwds_mem[used_slice]
     dones_array = dones_mem[used_slice]
     prop_array = prop_mem[used_slice]
+    action_sources_array = action_sources_mem[used_slice]
+    allowed_counts_array = allowed_counts_mem[used_slice]
     episode_ids_array = episode_ids_mem[used_slice]
+
+    # 目标动作概率（均匀随机基线）：1 / allowed_count
+    target_action_probs_array = np.zeros_like(allowed_counts_array, dtype=np.float32)
+    allowed_nonzero = allowed_counts_array > 0
+    target_action_probs_array[allowed_nonzero] = (
+        1.0 / allowed_counts_array[allowed_nonzero]
+    )
+
+    uniform_probs = np.zeros_like(prop_array, dtype=np.float32)
+    uniform_probs[allowed_nonzero] = 1.0 / allowed_counts_array[allowed_nonzero]
+    behavior_propensities_array = np.zeros_like(prop_array, dtype=np.float32)
+    greedy_mask = action_sources_array == ACTION_SOURCE_GREEDY
+    behavior_propensities_array[greedy_mask] = (
+        1.0 - POLICY_EPS_FIXED + uniform_probs[greedy_mask]
+    )
+    behavior_propensities_array[~greedy_mask] = uniform_probs[~greedy_mask]
 
     if keep_episode_ids:
         mask = np.isin(episode_ids_array, list(keep_episode_ids))
@@ -380,6 +407,8 @@ def generate_offline_dataset():
         rwds_array = rwds_array[mask]
         dones_array = dones_array[mask]
         prop_array = prop_array[mask]
+        action_sources_array = action_sources_array[mask]
+        allowed_counts_array = allowed_counts_array[mask]
         episode_ids_array = episode_ids_array[mask]
 
     # 最终把内存片段打包成 d3rlpy 的 MDPDataset，方便后续 BC / BCQ / CQL 复用
@@ -396,16 +425,24 @@ def generate_offline_dataset():
     print(f"离线数据集已保存至 {OUTPUT_DATASET_PATH}")
 
     behavior_meta_path = _behavior_meta_path(OUTPUT_DATASET_PATH)
-    np.savez(
-        behavior_meta_path,
-        propensities=prop_array,
-        actions=acts_array,
-        episode_ids=episode_ids_array,
-        terminals=dones_array,
-        epsilon=np.array([POLICY_EPS_FIXED], dtype=np.float32),
-        user_profiles=np.array(episode_profiles, dtype=object),
-        episode_start_idx=np.array(episode_start_indices, dtype=np.int32),
-    )
+    behavior_payload = {
+        "propensities": prop_array,
+        "actions": acts_array,
+        "episode_ids": episode_ids_array,
+        "terminals": dones_array,
+        "epsilon": np.array([POLICY_EPS_FIXED], dtype=np.float32),
+        "user_profiles": np.array(episode_profiles, dtype=object),
+        "episode_start_idx": np.array(episode_start_indices, dtype=np.int32),
+        "action_sources": action_sources_array,
+        "allowed_action_counts": allowed_counts_array,
+        "target_action_probs": target_action_probs_array,
+        "episode_steps": np.array([EPISODE_MAX_STEPS], dtype=np.int32),
+        "behavior_propensity": behavior_propensities_array,
+        "rule_eps": np.array([POLICY_EPS_FIXED], dtype=np.float32),
+    }
+    if DATASET_SPLIT_NAME:
+        behavior_payload["episode_split"] = np.array([DATASET_SPLIT_NAME], dtype=object)
+    np.savez(behavior_meta_path, **behavior_payload)
     print(f"行为策略倾向已保存至 {behavior_meta_path}")
 
     summary_df = pd.DataFrame(
@@ -470,6 +507,18 @@ def _parse_args():
         help="单条轨迹的最大步数（默认 EPISODE_MAX_STEPS）。",
     )
     parser.add_argument(
+        "--start-filter",
+        choices=["all", "even", "odd"],
+        default=None,
+        help="限制 MarketEnv 的 episode 起点池。even/odd 会按块交替抽样，确保时间窗不重叠。",
+    )
+    parser.add_argument(
+        "--start-block-size",
+        type=int,
+        default=None,
+        help="搭配 --start-filter 使用的时间块大小，单位=交易日（默认 1 表示逐日交替）。",
+    )
+    parser.add_argument(
         "--top-frac",
         type=float,
         default=None,
@@ -480,6 +529,12 @@ def _parse_args():
         type=float,
         default=None,
         help="当启用过滤时，保留回报>=该阈值的 episode（默认读取 DATASET_MIN_RETURN）。",
+    )
+    parser.add_argument(
+        "--split-name",
+        type=str,
+        default=None,
+        help="为当前数据集输出打上标签（如 train / val），写入行为元数据供后续校验。",
     )
     return parser.parse_args()
 
@@ -505,7 +560,7 @@ def main():
     args = _parse_args()
 
     global POLICY_EPS_FIXED, FILTER_LOW_RETURN, DATASET_KEEP_TOP_FRAC, DATASET_MIN_RETURN
-    global OUTPUT_DATASET_PATH, N_USERS_TO_SIMULATE, EPISODE_MAX_STEPS
+    global OUTPUT_DATASET_PATH, N_USERS_TO_SIMULATE, EPISODE_MAX_STEPS, DATASET_SPLIT_NAME
     if args.epsilon is not None:
         POLICY_EPS_FIXED = max(0.0, min(1.0, args.epsilon))
         print(f"使用自定义 ε 探索率: {POLICY_EPS_FIXED}")
@@ -528,6 +583,16 @@ def main():
     if args.episode_steps is not None:
         EPISODE_MAX_STEPS = max(1, args.episode_steps)
         print(f"使用自定义 episode 步数: {EPISODE_MAX_STEPS}")
+    if args.start_filter:
+        os.environ["EPISODE_START_POOL"] = args.start_filter
+        print(f"限制起点池模式: {args.start_filter}")
+    if args.start_block_size is not None:
+        block_size = max(1, args.start_block_size)
+        os.environ["EPISODE_START_BLOCK_SIZE"] = str(block_size)
+        print(f"起点块大小 (交易日): {block_size}")
+    if args.split_name:
+        DATASET_SPLIT_NAME = args.split_name.strip()
+        print(f"数据集 split 标签: {DATASET_SPLIT_NAME}")
     if IS_FAST_MODE:
         N_USERS_TO_SIMULATE = min(N_USERS_TO_SIMULATE, FAST_MODE_USER_CAP)
         EPISODE_MAX_STEPS = min(EPISODE_MAX_STEPS, FAST_MODE_STEP_CAP)

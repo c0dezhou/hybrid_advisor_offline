@@ -27,6 +27,10 @@ DEFAULT_EXPLORATION_RATE = float(os.getenv("RULE_POLICY_EPS", "0.0"))
 #                    - 30天滚动回报 (3)
 #                    - 30天滚动波动率 (3)
 #                    - VIX水平 (1)
+ACTION_SOURCE_GREEDY = 0
+ACTION_SOURCE_EPSILON = 1
+
+
 def policy_based_rule(
     state_vec: np.ndarray,
     allowed_cards: List[ActCard], # 已根据用户风险等级过滤的 `ActCard` 列表
@@ -35,7 +39,7 @@ def policy_based_rule(
     exploration_rate: Optional[float] = None,
     rng: Optional[np.random.Generator] = None,
     return_propensity: bool = False,
-) -> Union[Tuple[int, ActCard], Tuple[int, ActCard, float]]:
+) -> Union[Tuple[int, ActCard], Tuple[int, ActCard, float, int]]:
     """
     一个基于规则的策略，用于生成baseline行为并用于回测比较。
     这个策略也作为“行为策略”，用于生成离线数据集。
@@ -59,6 +63,7 @@ def policy_based_rule(
 
     eps = DEFAULT_EXPLORATION_RATE if exploration_rate is None else max(0.0, min(1.0, exploration_rate))
     propensity = 1.0
+    action_source = ACTION_SOURCE_GREEDY
     if eps > 0.0 and len(allowed_cards) > 1:
         rng = rng or np.random.default_rng()
         n_cards = len(allowed_cards)
@@ -68,7 +73,10 @@ def policy_based_rule(
         sampled_idx = int(rng.choice(n_cards, p=probs))
         chosen_card = allowed_cards[sampled_idx]
         propensity = float(probs[sampled_idx])
+        action_source = (
+            ACTION_SOURCE_GREEDY if sampled_idx == greedy_idx else ACTION_SOURCE_EPSILON
+        )
 
     if return_propensity:
-        return chosen_card.act_id, chosen_card, propensity
+        return chosen_card.act_id, chosen_card, propensity, action_source
     return chosen_card.act_id, chosen_card

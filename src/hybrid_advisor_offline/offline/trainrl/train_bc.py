@@ -18,7 +18,7 @@ from d3rlpy.dataset.buffers import InfiniteBuffer
 
 from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 
-DEFAULT_DATASET = "./data/offline_dataset.h5"
+DEFAULT_DATASET = "./data/offline_dataset_train.h5"
 DEFAULT_MODEL_OUTPUT = "./models/bc_model.pt"
 DEFAULT_STEPS = 500_000
 DEFAULT_LR = 1e-4

@@ -7,6 +7,8 @@ from typing import Tuple, Dict, Any
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_card_by_id
 from hybrid_advisor_offline.engine.state.state_builder import MarketSnapshot
 
+DEFAULT_ALLOC = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
 DATA_FILE = "./data/mkt_data.csv"
 INITIAL_BALANCE = 1000000.0  # 初始投资组合价值
 TRANSACTION_COST_PCT = 0.001  # 0.1% 的交易成本,核心作用是对过于频繁的交易施加惩罚
@@ -46,9 +48,13 @@ class MarketEnv:
         self.equity = 1.0
         self.high_water = 1.0
         self.curr_drawdown = 0.0
-        self._rng = np.random.default_rng()
+        self._has_custom_alloc = False
+        self._rng, self._rng_seed = self._load_rng()
         self._start_mode = self._load_start_mode()
+        self._start_block_size = self._load_start_block_size()
+        self._start_pool_mode = self._load_start_pool_mode()
         self._fixed_start_idx = self._load_fixed_start_idx()
+        self._start_idx_pool = self._build_start_idx_pool()
         self._current_start_idx = self._fixed_start_idx
         self._cursor = self._current_start_idx
         self._reset_counter = 0
@@ -86,13 +92,86 @@ class MarketEnv:
             self.mkt_sshots.append(sshot)
 
     def _load_start_mode(self) -> str:
-        mode = os.getenv("EPISODE_START_MODE", "").strip().lower() or "fixed"
+        mode = os.getenv("EPISODE_START_MODE", "").strip().lower() or "random"
         if mode not in {"fixed", "random"}:
             logger.warning(
                 "EPISODE_START_MODE=%s 不受支持，已回退至 fixed。", mode
             )
             mode = "fixed"
         return mode
+
+    def _load_start_block_size(self) -> int:
+        raw = os.getenv("EPISODE_START_BLOCK_SIZE")
+        if raw is None:
+            return 1
+        try:
+            size = int(raw)
+        except ValueError:
+            logger.warning(
+                "无法解析 EPISODE_START_BLOCK_SIZE=%s，已回退到 1。",
+                raw,
+            )
+            return 1
+        return max(1, size)
+
+    def _load_start_pool_mode(self) -> str:
+        mode = os.getenv("EPISODE_START_POOL", "").strip().lower() or "all"
+        if mode not in {"all", "even", "odd"}:
+            logger.warning(
+                "EPISODE_START_POOL=%s 不受支持，已回退至 all。", mode
+            )
+            mode = "all"
+        return mode
+
+    def _build_start_idx_pool(self) -> list[int]:
+        if self._start_mode != "random":
+            return []
+        max_idx = self._max_random_start_idx()
+        max_idx = max(0, max_idx)
+        candidates = list(range(0, max_idx + 1))
+        if not candidates:
+            return [0]
+        if self._start_pool_mode == "all":
+            return candidates
+        target_parity = 0 if self._start_pool_mode == "even" else 1
+        block_size = self._start_block_size
+        block_size = max(1, block_size)
+        allowed: list[int] = []
+        max_start = max_idx + 1
+        block_id = 0
+        for block_start in range(0, max_start, block_size):
+            block_end = min(block_start + block_size, max_start)
+            effective_span = block_end - block_start
+            if effective_span < self._max_episode_steps:
+                block_id += 1
+                continue
+            if (block_id % 2) == target_parity:
+                allowed.extend(range(block_start, block_end))
+            block_id += 1
+        if not allowed:
+            logger.warning(
+                "start_pool_mode=%s block_size=%d 导致空的起点集合，已回退到 all。",
+                self._start_pool_mode,
+                block_size,
+            )
+            return candidates
+        return allowed
+
+    def _load_rng(self) -> tuple[np.random.Generator, int]:
+        raw = os.getenv("EPISODE_START_SEED")
+        default_seed = 42
+        if raw is None:
+            return np.random.default_rng(default_seed), default_seed
+        try:
+            seed = int(raw)
+        except ValueError:
+            logger.warning(
+                "无法解析 EPISODE_START_SEED=%s，已回退到默认种子 %d。",
+                raw,
+                default_seed,
+            )
+            seed = default_seed
+        return np.random.default_rng(seed), seed
 
     def _load_fixed_start_idx(self) -> int:
         raw = os.getenv("EPISODE_FIXED_START")
@@ -113,6 +192,9 @@ class MarketEnv:
     def _sample_episode_start_idx(self) -> int:
         if self._start_mode == "fixed":
             return self._fixed_start_idx
+        if self._start_idx_pool:
+            idx = int(self._rng.choice(self._start_idx_pool))
+            return idx
         max_idx = self._max_random_start_idx()
         if max_idx <= 0:
             return 0
@@ -122,13 +204,21 @@ class MarketEnv:
         if self._start_config_logged:
             return
         logger.info(
-            "MarketEnv start mode=%s, fixed_start=%d, random_range=[%d, %d], num_days=%d, max_episode_steps=%d",
+            (
+                "MarketEnv start mode=%s, fixed_start=%d, random_range=[%d, %d], "
+                "num_days=%d, max_episode_steps=%d, start_seed=%d, pool_mode=%s, "
+                "block_size=%d, pool_count=%d"
+            ),
             self._start_mode,
             self._fixed_start_idx,
             0,
             self._max_random_start_idx(),
             self._num_days,
             self._max_episode_steps,
+            self._rng_seed,
+            self._start_pool_mode,
+            self._start_block_size,
+            len(self._start_idx_pool) if self._start_idx_pool else 0,
         )
         self._start_config_logged = True
 
@@ -151,6 +241,7 @@ class MarketEnv:
         self.equity = 1.0
         self.high_water = 1.0
         self.curr_drawdown = 0.0
+        self._has_custom_alloc = False
 
         info = {
             "mkt_sshot": self.mkt_sshots[self.curr_step],
@@ -158,6 +249,7 @@ class MarketEnv:
             "portfolio_value": self.portfolio_value,
             "drawdown": self.curr_drawdown,
             "episode_start_idx": self._current_start_idx,
+            "has_custom_alloc": self._has_custom_alloc,
         }
         return info
     
@@ -176,6 +268,9 @@ class MarketEnv:
 
         # 3. 更新配置
         self.curr_alloc = target_alloc
+        self._has_custom_alloc = not np.allclose(
+            self.curr_alloc, np.array([0.0, 0.0, 1.0]), atol=1e-5
+        )
 
         # 4.计算当天的投资组合回报
         today_returns = self.daily_returns.iloc[self._cursor].values
@@ -212,9 +307,18 @@ class MarketEnv:
             "portfolio_value": self.portfolio_value,
             "drawdown": self.curr_drawdown,
             "episode_start_idx": self._current_start_idx,
+            "has_custom_alloc": self._has_custom_alloc,
         }
 
         return portfolio_daily_return, done, next_info
+
+    def set_custom_alloc(self, alloc: np.ndarray) -> None:
+        """允许业务层在 episode 开始前填入用户的当前仓位。"""
+        alloc = np.asarray(alloc, dtype=np.float32)
+        if not np.isclose(alloc.sum(), 1.0, atol=1e-3):
+            raise ValueError("alloc must sum to 1.0")
+        self.curr_alloc = alloc
+        self._has_custom_alloc = not np.allclose(alloc, np.array([0.0, 0.0, 1.0]), atol=1e-5)
     
 if __name__ == '__main__':
     print("\n----------测试市场环境----------")

@@ -5,13 +5,11 @@ from d3rlpy.dataset import ReplayBuffer, create_infinite_replay_buffer
 from d3rlpy.dataset.buffers import InfiniteBuffer
 from d3rlpy.preprocessing.observation_scalers import StandardObservationScaler
 from d3rlpy.logging import FileAdapterFactory
-from sklearn.model_selection import train_test_split
-
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_act_space_size
 from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
 from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
 
-DEFAULT_DATASET_PATH = "./data/offline_dataset.h5"
+DEFAULT_DATASET_PATH = "./data/offline_dataset_train.h5"
 DEFAULT_MODEL_SAVE_PATH = "./models/cql_discrete_model.pt"
 DATASET_PATH = DEFAULT_DATASET_PATH
 MODEL_SAVE_PATH = DEFAULT_MODEL_SAVE_PATH
@@ -151,10 +149,8 @@ def tarin_discrete_cql(require_gpu: bool):
     )
 
     episo = list(dataset.episodes)
-    train_episo, test_episo = train_test_split(episo, test_size=0.2, random_state=42)
-    train_buff = create_infinite_replay_buffer(episodes=train_episo)
-    test_buff = create_infinite_replay_buffer(episodes=test_episo)
-    print(f"训练集轨迹总数{train_buff.size()},验证集轨迹总数：{test_buff.size()}")
+    train_buff = create_infinite_replay_buffer(episodes=episo)
+    print(f"训练样本：{train_buff.size()} 条转移，全部 {len(episo)} 条轨迹均用于训练。")
 
     action_size = get_act_space_size()
     print(f"动作空间size:{action_size}")
