@@ -121,7 +121,7 @@ def test_eval_pipeline_produces_positive_value(tmp_path):
         loaded_buffer,
         validation_ratio=0.0,
     )
-    fqe_metrics = run_fqe(
+    fqe_metrics, _ = run_fqe(
         loaded_policy,
         train_ds,
         val_dataset=None,

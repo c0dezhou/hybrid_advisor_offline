@@ -199,6 +199,7 @@ def main() -> None:
         "learning_rate": cli_args.learning_rate,
         "batch_size": cli_args.batch_size,
         "reward_scale": reward_scale_applied,
+        "dataset_path": cli_args.dataset,
     }
     config_path = f"{cli_args.model_output}.config.json"
     config_dir = os.path.dirname(config_path)

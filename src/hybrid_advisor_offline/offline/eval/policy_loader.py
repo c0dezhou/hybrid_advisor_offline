@@ -14,6 +14,7 @@ from d3rlpy.algos import (
 )
 from d3rlpy.constants import ActionSpace
 from d3rlpy.dataset import MDPDataset, ReplayBuffer
+from d3rlpy.dataset.buffers import InfiniteBuffer
 from d3rlpy.preprocessing.observation_scalers import StandardObservationScaler
 from d3rlpy.preprocessing.reward_scalers import StandardRewardScaler
 from hybrid_advisor_offline.offline.utils.reward_scaling import apply_reward_scale
@@ -158,6 +159,37 @@ def load_trained_policy(
     dataset_for_build = _buffer_to_dataset(replay_buffer, resolved_action_size)
     policy.build_with_dataset(dataset_for_build)
     policy.load_model(model_path)
+    return policy
+
+
+def load_policy_artifact(
+    model_path: str,
+    *,
+    require_gpu: bool = False,
+    action_size: Optional[int] = None,
+):
+    """
+    根据模型 config 中记录的 dataset_path 自动加载 ReplayBuffer，
+    并复用 load_trained_policy 组装策略，面向推理/前端使用。
+    """
+    cfg = load_training_config(model_path)
+    dataset_path = cfg.get("dataset_path")
+    if not dataset_path:
+        raise ValueError(
+            f"模型 {model_path} 的配置中缺少 dataset_path，无法恢复策略。"
+        )
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(
+            f"dataset_path={dataset_path} 不存在，无法加载策略。"
+        )
+    replay_buffer = ReplayBuffer.load(dataset_path, buffer=InfiniteBuffer())
+    act_size = action_size or cfg.get("action_size")
+    policy = load_trained_policy(
+        model_path,
+        replay_buffer,
+        require_gpu=require_gpu,
+        action_size=act_size,
+    )
     return policy
 def load_training_config(model_path: str) -> dict:
     candidates = [f"{model_path}.config.json"]

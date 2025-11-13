@@ -11,7 +11,7 @@
 import argparse
 import json
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -113,25 +113,6 @@ def parse_args():
     return parser.parse_args()
 
 
-def _compute_equity_and_max_drawdown(step_returns: np.ndarray) -> tuple[float, float]:
-    """
-    根据一条 episode 的逐步收益序列计算累计收益和最大回撤。
-
-    说明：由于训练 reward 现已仅由 market_return（+可选客户接受度）构成，
-    这里直接把 reward 视作“近似收益”，用来恢复净值曲线。
-    """
-    if step_returns.size == 0:
-        return 0.0, 0.0
-
-    step_returns = step_returns.astype(np.float64)
-    equity = np.cumprod(np.clip(1.0 + step_returns, 1e-6, None))
-    peaks = np.maximum.accumulate(equity)
-    drawdowns = equity / np.clip(peaks, 1e-6, None) - 1.0
-    max_dd = float(drawdowns.min())
-    total_return = float(equity[-1] - 1.0)
-    return total_return, max_dd
-
-
 def _infer_risk_bucket(profile_dict: Dict[str, Any]) -> int | None:
     """复用 UserProfile.risk_bucket 的年龄分档逻辑。"""
     age = profile_dict.get("age")
@@ -144,11 +125,55 @@ def _infer_risk_bucket(profile_dict: Dict[str, Any]) -> int | None:
     if age > 35:
         return 1
     return 2
+def _load_behavior_profiles(behavior_meta_path: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    if not behavior_meta_path or not os.path.exists(behavior_meta_path):
+        return None
+    try:
+        meta = np.load(behavior_meta_path, allow_pickle=True)
+    except OSError:
+        return None
+    meta_profiles = meta.get("user_profiles")
+    if meta_profiles is None:
+        return None
+    profiles: list[dict[str, Any]] = []
+    for item in meta_profiles:
+        if isinstance(item, dict):
+            profiles.append(item)
+            continue
+        try:
+            obj = item.item()
+            if isinstance(obj, dict):
+                profiles.append(obj)
+                continue
+        except Exception:
+            pass
+        try:
+            profiles.append(dict(item))
+        except Exception:
+            profiles.append({})
+    return profiles
+
+
+def _build_episode_bucket_map(
+    profiles: Optional[list[dict[str, Any]]],
+    num_episodes: int,
+) -> Dict[int, int]:
+    if not profiles:
+        return {}
+    buckets: Dict[int, int] = {}
+    limit = min(len(profiles), num_episodes)
+    for idx in range(limit):
+        bucket = _infer_risk_bucket(profiles[idx])
+        if bucket is not None:
+            buckets[idx] = int(bucket)
+    return buckets
 
 
 def _collect_episode_metrics(
     replay_buffer,
-    behavior_meta_path: str | None,
+    episode_bucket_map: Optional[Dict[int, int]] = None,
+    *,
+    reward_scale_fallback: float = 1.0,
 ) -> pd.DataFrame:
     episodes = list(replay_buffer.episodes)
     if not episodes:
@@ -156,35 +181,24 @@ def _collect_episode_metrics(
             columns=["episode_id", "total_return", "max_drawdown", "risk_bucket"]
         )
 
-    profiles: list[dict[str, Any]] | None = None
-    if behavior_meta_path and os.path.exists(behavior_meta_path):
-        meta = np.load(behavior_meta_path, allow_pickle=True)
-        meta_profiles = meta.get("user_profiles")
-        if meta_profiles is not None:
-            profiles = []
-            for item in meta_profiles:
-                if isinstance(item, dict):
-                    profiles.append(item)
-                    continue
-                try:
-                    obj = item.item()
-                    if isinstance(obj, dict):
-                        profiles.append(obj)
-                        continue
-                except Exception:
-                    pass
-                try:
-                    profiles.append(dict(item))
-                except Exception:
-                    profiles.append({})
+    reward_scale_applied = float(
+        getattr(replay_buffer, "_reward_scale_applied", reward_scale_fallback) or 1.0
+    )
+    inv_scale = 1.0 / reward_scale_applied if reward_scale_applied != 1.0 else 1.0
 
     rows: list[dict[str, Any]] = []
     for ep_id, episode in enumerate(episodes):
-        step_returns = np.asarray(episode.rewards, dtype=np.float64).reshape(-1)
-        total_ret, max_dd = _compute_equity_and_max_drawdown(step_returns)
-        risk_bucket = None
-        if profiles is not None and ep_id < len(profiles):
-            risk_bucket = _infer_risk_bucket(profiles[ep_id])
+        step_rewards = np.asarray(episode.rewards, dtype=np.float64).reshape(-1)
+        if inv_scale != 1.0:
+            step_rewards = step_rewards * inv_scale
+        total_ret = float(step_rewards.sum())
+        if step_rewards.size:
+            cum_rewards = np.cumsum(step_rewards)
+            worst_cum = float(cum_rewards.min())
+        else:
+            worst_cum = 0.0
+        max_dd = worst_cum
+        risk_bucket = episode_bucket_map.get(ep_id) if episode_bucket_map else None
         rows.append(
             {
                 "episode_id": ep_id,
@@ -218,6 +232,38 @@ def _build_risk_metrics(df: pd.DataFrame) -> Dict[str, Any]:
     return metrics
 
 
+def _compute_fqe_by_bucket(
+    fqe_model,
+    replay_buffer,
+    episode_bucket_map: Optional[Dict[int, int]],
+) -> Dict[str, Any]:
+    if fqe_model is None or not episode_bucket_map:
+        return {}
+    bucket_values: Dict[int, list[float]] = {}
+    for ep_id, episode in enumerate(replay_buffer.episodes):
+        bucket = episode_bucket_map.get(ep_id)
+        if bucket is None:
+            continue
+        observations = np.asarray(episode.observations, dtype=np.float32)
+        if observations.size == 0:
+            continue
+        state = observations[:1]
+        try:
+            value = float(fqe_model.predict_value(state)[0])
+        except Exception:
+            continue
+        bucket_values.setdefault(bucket, []).append(value)
+    stats: Dict[str, Any] = {}
+    for bucket, values in bucket_values.items():
+        if not values:
+            continue
+        stats[str(bucket)] = {
+            "n_episodes": len(values),
+            "avg_value": float(np.mean(values)),
+        }
+    return stats
+
+
 def main() -> None:
     args = parse_args()
 
@@ -235,10 +281,40 @@ def main() -> None:
             f"fqe_steps={fqe_steps}, eval_interval={eval_interval}"
         )
 
+    behavior_meta_path = _behavior_meta_path(args.dataset, args.behavior_meta)
+    behavior_profiles = _load_behavior_profiles(behavior_meta_path)
+    if behavior_meta_path and os.path.exists(behavior_meta_path):
+        with np.load(behavior_meta_path, allow_pickle=True) as meta_tmp:
+            has_action_sources = "action_sources" in meta_tmp.files
+        if has_action_sources:
+            print("[eval_policy] behavior meta contains action_sources; risk_metrics can be grouped by source.")
+        else:
+            print("[eval_policy] behavior meta missing action_sources; skip by_action_source grouping.")
+
     train_cfg = load_training_config(args.model)
     reward_scale = train_cfg.get("reward_scale", 1.0)
 
+    print(f"[eval_policy] reward_scale(train_config)={reward_scale}")
+
     replay_buffer = load_replay_buffer(args.dataset, reward_scale=reward_scale)
+    applied_scale = getattr(replay_buffer, "_reward_scale_applied", None)
+    print(f"[eval_policy] reward_scale_applied(buffer)={applied_scale}")
+    if replay_buffer.episodes:
+        sample_rewards = np.asarray(replay_buffer.episodes[0].rewards, dtype=np.float64)
+        if sample_rewards.size:
+            print(
+                "[eval_policy] sample_reward_stats",
+                f"min={sample_rewards.min():.6f}",
+                f"max={sample_rewards.max():.6f}",
+                f"mean={sample_rewards.mean():.6f}",
+            )
+    if behavior_profiles is None:
+        print("[eval_policy] behavior meta lacks user_profiles; risk buckets per episode will be empty.")
+
+    episode_bucket_map = _build_episode_bucket_map(
+        behavior_profiles,
+        len(replay_buffer.episodes),
+    )
     policy = load_trained_policy(
         args.model,
         replay_buffer,
@@ -251,7 +327,7 @@ def main() -> None:
     )
 
     print("--- 运行 Fitted Q Evaluation (FQE) ---")
-    fqe_metrics = run_fqe(
+    fqe_metrics, fqe_model = run_fqe(
         policy,
         train_dataset,
         val_dataset,
@@ -261,8 +337,7 @@ def main() -> None:
         require_gpu=args.require_gpu,
     )
 
-    behavior_meta_path = _behavior_meta_path(args.dataset, args.behavior_meta)
-
+    fqe_by_bucket = _compute_fqe_by_bucket(fqe_model, replay_buffer, episode_bucket_map)
     cpe_metrics: Dict[str, Any] = {}
     if args.no_cpe:
         print("跳过 CPE 评估。")
@@ -274,12 +349,20 @@ def main() -> None:
         )
 
     summary = {
+        "model_path": args.model,
+        "dataset_path": args.dataset,
         "fqe": fqe_metrics,
         "cpe": cpe_metrics,
     }
+    if fqe_by_bucket:
+        summary["fqe_by_risk_bucket"] = fqe_by_bucket
 
     print("--- 统计 episode 风险指标（max drawdown） ---")
-    episode_df = _collect_episode_metrics(replay_buffer, behavior_meta_path)
+    episode_df = _collect_episode_metrics(
+        replay_buffer,
+        episode_bucket_map,
+        reward_scale_fallback=reward_scale,
+    )
     summary["risk_metrics"] = _build_risk_metrics(episode_df)
 
     print("\n=== 评估结果 ===")

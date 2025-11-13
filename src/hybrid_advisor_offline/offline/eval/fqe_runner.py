@@ -82,4 +82,4 @@ def run_fqe(
     _append_scaled_metrics("train", train_dataset)
     _append_scaled_metrics("val", val_dataset)
 
-    return metrics
+    return metrics, fqe

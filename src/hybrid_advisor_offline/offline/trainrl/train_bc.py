@@ -188,6 +188,7 @@ def main() -> None:
         "learning_rate": args.learning_rate,
         "batch_size": args.batch_size,
         "reward_scale": args.reward_scale,
+        "dataset_path": args.dataset,
     }
     preferred_config_path = f"{args.model_output}.config.json"
     legacy_config_path = args.model_output.replace(".pt", ".config.json")
