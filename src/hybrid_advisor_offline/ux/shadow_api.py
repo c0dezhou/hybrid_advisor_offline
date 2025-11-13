@@ -13,11 +13,10 @@ FastAPI 影子接口：Hybrid Advisor Offline
 from __future__ import annotations
 
 import hashlib
-import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, validator
 
 from hybrid_advisor_offline.llm.text_translator import refine_text
@@ -37,8 +36,7 @@ from hybrid_advisor_offline.engine.state.state_builder import (
     UserProfile,
     build_state_vec,
 )
-from hybrid_advisor_offline.offline.trainrl import train_cql
-from hybrid_advisor_offline.offline.trainrl.train_cql import load_cql_policy_from_paths
+from hybrid_advisor_offline.offline.eval.policy_loader import load_policy_artifact
 
 
 def _predict_q_values(policy, state_vec: np.ndarray) -> np.ndarray:
@@ -79,17 +77,12 @@ class UserProfileInput(BaseModel):
         return arr.tolist()
 
 
-DEMO_MODE = os.getenv("DEMO_MODE", "0") == "1"
-DEMO_DATASET_PATH = os.getenv("DEMO_DATASET_PATH", "./data/offline_dataset_demo.h5")
-DEMO_MODEL_PATH = os.getenv("DEMO_MODEL_PATH", "./models/cql_demo.pt")
-FULL_DATASET_PATH = os.getenv(
-    "STREAMLIT_DATASET_PATH",
-    getattr(train_cql, "DATASET_PATH", "./data/offline_dataset.h5"),
-)
-FULL_MODEL_PATH = os.getenv(
-    "STREAMLIT_MODEL_PATH",
-    getattr(train_cql, "MODEL_SAVE_PATH", "./models/cql_discrete_model.pt"),
-)
+MODEL_REGISTRY: Dict[str, str] = {
+    "bcq": "./models/bcq_reward_personal.pt",
+    "bc": "./models/bc_reward_personal.pt",
+    "cql": "./models/cql_reward_personal.pt",
+}
+DEFAULT_MODEL_KEY = "bcq"
 
 
 class RecommendationResponse(BaseModel):
@@ -100,6 +93,7 @@ class RecommendationResponse(BaseModel):
     customer_friendly_text: str
     audit_hash: str
     translator_meta: str
+    model: str
 
 
 app = FastAPI(
@@ -108,46 +102,71 @@ app = FastAPI(
     version="0.1.0",
 )
 
-_cql_policy = None
+_policies: Dict[str, object] = {}
 _latest_snapshot: Optional[MarketSnapshot] = None
 
 
 @app.on_event("startup")
 def _load_resources():
-    global _cql_policy, _latest_snapshot
+    global _latest_snapshot
     try:
-        dataset_path = DEMO_DATASET_PATH if DEMO_MODE else FULL_DATASET_PATH
-        model_path = DEMO_MODEL_PATH if DEMO_MODE else FULL_MODEL_PATH
-        _cql_policy = load_cql_policy_from_paths(
-            dataset_path,
-            model_path,
-            require_gpu=False,
-        )
         env = MarketEnv()
         _latest_snapshot = env.mkt_sshots[-1]
-        mode = "DEMO" if DEMO_MODE else "FULL"
-        print(f"影子接口：模型与市场快照加载成功（{mode}）。")
+        _get_policy(DEFAULT_MODEL_KEY)
+        print("影子接口：模型与市场快照加载成功。")
     except Exception as exc:  # pragma: no cover - 启动日志
-        _cql_policy = None
+        _policies.clear()
         _latest_snapshot = None
         print(f"影子接口：资源加载失败 {exc}")
 
 
+def _normalize_model_key(model: str) -> str:
+    key = (model or "").strip().lower()
+    if key not in MODEL_REGISTRY:
+        raise KeyError(key)
+    return key
+
+
+def _get_policy(model_key: str):
+    normalized = _normalize_model_key(model_key)
+    if normalized not in _policies:
+        path = MODEL_REGISTRY[normalized]
+        _policies[normalized] = load_policy_artifact(path, require_gpu=False)
+    return _policies[normalized], normalized
+
+
 @app.get("/", summary="健康检查")
 def health_check():
-    status = "ready" if _cql_policy and _latest_snapshot is not None else "loading"
-    return {"status": status, "message": "Hybrid Advisor Offline API"}
+    status = "ready" if _policies and _latest_snapshot is not None else "loading"
+    return {
+        "status": status,
+        "message": "Hybrid Advisor Offline API",
+        "models_loaded": list(_policies.keys()),
+    }
 
 
 @app.post("/recommend", response_model=RecommendationResponse, summary="获取 AI 推荐")
-def recommend(payload: UserProfileInput):
-    if _cql_policy is None or _latest_snapshot is None:
+def recommend(
+    payload: UserProfileInput,
+    model: str = Query(
+        DEFAULT_MODEL_KEY,
+        description=f"策略模型（可选：{', '.join(MODEL_REGISTRY.keys())}）",
+    ),
+):
+    if _latest_snapshot is None:
         raise HTTPException(status_code=503, detail="模型尚未加载完成")
+    try:
+        policy, normalized = _get_policy(model)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的模型标识 '{model}'，可选值：{', '.join(MODEL_REGISTRY.keys())}",
+        )
 
     profile = UserProfile(**payload.dict(exclude={"current_alloc"}))
     current_alloc = np.asarray(payload.current_alloc, dtype=np.float32)
     state_vec = build_state_vec(_latest_snapshot, profile, current_alloc)
-    q_values = _predict_q_values(_cql_policy, state_vec)
+    q_values = _predict_q_values(policy, state_vec)
 
     allowed_cards = allowed_cards_for_user(profile.risk_bucket)
     allowed_ids = [card.act_id for card in allowed_cards]
@@ -194,6 +213,7 @@ def recommend(payload: UserProfileInput):
         customer_friendly_text=customer_text,
         audit_hash=audit_hash,
         translator_meta=translator_meta,
+        model=normalized,
     )
 
 

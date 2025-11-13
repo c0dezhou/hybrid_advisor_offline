@@ -194,6 +194,7 @@ def _build_messages(text: str, context: Dict[str, Any]) -> Tuple[str, str]:
     sys_prompt = (
         "你是银行投顾文案润色助手。请在保留合规表述、不加入承诺性词语的前提下，"
         "让解释更自然、强调风险匹配度，让普通人更易读懂。输出仅包含润色后的中文文本。"
+        "增加区分度和说服力"
     )
     user_prompt = (
         f"客户风险等级：{RISK_LABELS.get(context.get('user_risk_bucket'), '未知')}\n"
