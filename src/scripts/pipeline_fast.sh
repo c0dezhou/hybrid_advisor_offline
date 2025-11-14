@@ -44,20 +44,27 @@ step() {
 run_eval() {
   local algo="$1"
   local model="$2"
+  shift 2
+  local extra_args=("$@")
   local log_path="$ARTIFACT_DIR/${algo}.log"
   local summary_path="$ARTIFACT_DIR/${algo}.summary.json"
 
   step "评估 ${algo} (fast-dev)"
-  python -m hybrid_advisor_offline.offline.eval.eval_policy \
-    --dataset "$DATA" \
-    --model "$model" \
-    --behavior-meta "$META" \
-    --fast-dev \
-    --fqe-steps "$FQE_STEPS" \
-    --eval-interval "$EVAL_INTERVAL" \
-    --validation-ratio "$VALIDATION_RATIO" \
-    "${GPU_FLAG[@]}" \
-    | tee "$log_path"
+  local cmd=(
+    python -m hybrid_advisor_offline.offline.eval.eval_policy
+    --dataset "$DATA"
+    --model "$model"
+    --behavior-meta "$META"
+    --fast-dev
+    --fqe-steps "$FQE_STEPS"
+    --eval-interval "$EVAL_INTERVAL"
+    --validation-ratio "$VALIDATION_RATIO"
+    "${GPU_FLAG[@]}"
+  )
+  if [[ ${#extra_args[@]} -gt 0 ]]; then
+    cmd+=("${extra_args[@]}")
+  fi
+  "${cmd[@]}" | tee "$log_path"
 
   python - "$log_path" "$summary_path" <<'PY'
 import json, pathlib, sys
@@ -113,7 +120,18 @@ python -m hybrid_advisor_offline.offline.trainrl.train_cql \
   "${GPU_FLAG[@]}"
 
 run_eval "bc_fast" "./models/bc_fast.pt"
-run_eval "bcq_fast" "./models/bcq_fast.pt"
+run_eval "bcq_fast" "./models/bcq_fast.pt" --backtest
+BT_FAST_CSV="./models/bcq_fast.pt.backtest_val.csv"
+FAIRNESS_FAST_REPORT="$REPORT_DIR/fairness_bcq_fast.json"
+if [[ -f "$BT_FAST_CSV" ]]; then
+  python -m hybrid_advisor_offline.offline.analysis.fairness_audit \
+    --backtest-csv "$BT_FAST_CSV" \
+    --profiles-npz "$META" \
+    --report-json "$FAIRNESS_FAST_REPORT"
+  echo "[pipeline-fast] 公平性审计报告已写入 $FAIRNESS_FAST_REPORT"
+else
+  echo "[pipeline-fast] 跳过公平性审计，缺少 $BT_FAST_CSV"
+fi
 run_eval "cql_fast" "./models/cql_fast.pt"
 
 step "3) 生成 BCQ fast 分群图（可选）"

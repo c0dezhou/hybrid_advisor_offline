@@ -54,6 +54,8 @@ class MarketEnv:
         self._start_block_size = self._load_start_block_size()
         self._start_pool_mode = self._load_start_pool_mode()
         self._fixed_start_idx = self._load_fixed_start_idx()
+        self._embargo_days = self._load_embargo_days()
+        self._start_range_raw = self._load_start_range_raw()
         self._start_idx_pool = self._build_start_idx_pool()
         self._current_start_idx = self._fixed_start_idx
         self._cursor = self._current_start_idx
@@ -123,6 +125,54 @@ class MarketEnv:
             mode = "all"
         return mode
 
+    def _load_embargo_days(self) -> int:
+        raw = os.getenv("EPISODE_EMBARGO_DAYS")
+        if raw is None:
+            return 0
+        try:
+            days = int(raw)
+        except ValueError:
+            logger.warning(
+                "无法解析 EPISODE_EMBARGO_DAYS=%s，已回退到 0。", raw
+            )
+            return 0
+        return max(0, days)
+
+    def _load_start_range_raw(self) -> tuple[int | None, int | None]:
+        raw = os.getenv("EPISODE_START_RANGE", "").strip()
+        if not raw:
+            return (None, None)
+        sep = ":" if ":" in raw else ","
+        parts = [p.strip() for p in raw.split(sep, 1)]
+        try:
+            start = int(parts[0]) if parts[0] else 0
+        except ValueError:
+            logger.warning(
+                "无法解析 EPISODE_START_RANGE=%s，已忽略。", raw
+            )
+            return (None, None)
+        end = None
+        if len(parts) > 1 and parts[1]:
+            try:
+                end = int(parts[1])
+            except ValueError:
+                logger.warning(
+                    "无法解析 EPISODE_START_RANGE 末尾=%s，已忽略上限。", parts[1]
+                )
+        start = max(0, start)
+        end = None if end is None else max(end, start)
+        return (start, end)
+
+    def _resolve_start_range(self, max_start: int) -> tuple[int | None, int | None]:
+        start, end = self._start_range_raw
+        if start is not None:
+            start = min(start, max_start)
+        if end is not None:
+            end = min(end, max_start)
+            if start is not None and end < start:
+                end = start
+        return (start, end)
+
     def _build_start_idx_pool(self) -> list[int]:
         if self._start_mode != "random":
             return []
@@ -136,6 +186,7 @@ class MarketEnv:
         target_parity = 0 if self._start_pool_mode == "even" else 1
         block_size = self._start_block_size
         block_size = max(1, block_size)
+        width = self._max_episode_steps + self._embargo_days
         allowed: list[int] = []
         max_start = max_idx + 1
         block_id = 0
@@ -148,6 +199,23 @@ class MarketEnv:
             if (block_id % 2) == target_parity:
                 allowed.extend(range(block_start, block_end))
             block_id += 1
+        range_min, range_max = self._resolve_start_range(max_start)
+        if range_min is not None or range_max is not None:
+            filtered: list[int] = []
+            for idx in allowed:
+                if range_min is not None and idx < range_min:
+                    continue
+                if range_max is not None and idx >= range_max:
+                    continue
+                filtered.append(idx)
+            if filtered:
+                allowed = filtered
+            else:
+                logger.warning(
+                    "EPISODE_START_RANGE=%s 过滤后候选集合为空，回退到 all。",
+                    os.getenv("EPISODE_START_RANGE", ""),
+                )
+                return candidates
         if not allowed:
             logger.warning(
                 "start_pool_mode=%s block_size=%d 导致空的起点集合，已回退到 all。",
@@ -207,7 +275,7 @@ class MarketEnv:
             (
                 "MarketEnv start mode=%s, fixed_start=%d, random_range=[%d, %d], "
                 "num_days=%d, max_episode_steps=%d, start_seed=%d, pool_mode=%s, "
-                "block_size=%d, pool_count=%d"
+                "block_size=%d, embargo_days=%d, pool_count=%d"
             ),
             self._start_mode,
             self._fixed_start_idx,
@@ -218,6 +286,7 @@ class MarketEnv:
             self._rng_seed,
             self._start_pool_mode,
             self._start_block_size,
+            self._embargo_days,
             len(self._start_idx_pool) if self._start_idx_pool else 0,
         )
         self._start_config_logged = True

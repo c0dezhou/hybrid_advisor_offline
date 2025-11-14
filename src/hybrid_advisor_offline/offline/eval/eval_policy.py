@@ -3,7 +3,7 @@
 # 最后用这个 Q 函数估计策略的长期回报。
 
 # 评估入口：FQE + CPE + 环境回测 + 公平性检查。
-# 目前没做回测和公平性
+# 加回测和公平性检查
 # python -m hybrid_advisor_offline.offline.eval.eval_policy \
 #   --dataset ./data/offline_dataset.h5 \
 #   --model ./models/cql_discrete_model.pt
@@ -11,10 +11,13 @@
 import argparse
 import json
 import os
+import random
 from typing import Any, Dict, Optional
 
+import inspect
 import numpy as np
 import pandas as pd
+import torch
 
 from hybrid_advisor_offline.offline.eval.fqe_data import (
     DATASET_PATH_DEFAULT,
@@ -23,6 +26,13 @@ from hybrid_advisor_offline.offline.eval.fqe_data import (
 )
 from hybrid_advisor_offline.offline.eval.cpe_metrics import compute_cpe_report
 from hybrid_advisor_offline.offline.eval.fqe_runner import run_fqe
+from hybrid_advisor_offline.engine.act_safety.act_cards_factory import build_card_factory
+from hybrid_advisor_offline.engine.envs.market_envs import MarketEnv
+from hybrid_advisor_offline.engine.state.state_builder import (
+    UserProfile,
+    build_state_vec,
+    make_up_to_vec,
+)
 from hybrid_advisor_offline.offline.eval.policy_loader import (
     load_trained_policy,
     load_training_config,
@@ -38,6 +48,25 @@ MODEL_PATH_DEFAULT = "./models/cql_discrete_model.pt"
 BEHAVIOR_META_SUFFIX = "_behavior.npz"
 EXPERIMENT_MODE = os.getenv("EXPERIMENT_MODE", "full").lower()
 _FAST_MODE_NAMES = {"fast", "dev"}
+_PROFILE_FIELDS = set(UserProfile.__dataclass_fields__)
+
+
+def _set_global_seeds(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
+def _observation_scaler_name(policy) -> str:
+    impl = getattr(policy, "impl", policy)
+    scaler = getattr(impl, "observation_scaler", None)
+    if scaler is None:
+        return "none"
+    return scaler.__class__.__name__
 
 
 def _behavior_meta_path(dataset_path: str, override: str | None) -> str | None:
@@ -104,6 +133,29 @@ def parse_args():
         type=str,
         default=None,
         help="行为策略倾向文件路径（默认与 dataset 同名前缀 + _behavior.npz）。",
+    )
+    parser.add_argument(
+        "--policy",
+        choices=["trained", "behavior"],
+        default="trained",
+        help="指定执行哪类策略：有训练模型时选择 trained。",
+    )
+    parser.add_argument(
+        "--backtest",
+        action="store_true",
+        help="对策略做环境回测并输出 backtest_metrics。",
+    )
+    parser.add_argument(
+        "--backtest-episodes",
+        type=int,
+        default=None,
+        help="最多回测多少条验证集 episode；默认全量。",
+    )
+    parser.add_argument(
+        "--backtest-seed",
+        type=int,
+        default=None,
+        help="回测用的随机种子（默认取 VAL_START_SEED/0）。",
     )
     parser.add_argument(
         "--fast-dev",
@@ -270,6 +322,310 @@ def _compute_fqe_by_bucket(
     return stats
 
 
+def _dict_to_user_profile(profile_data: Any) -> Optional[UserProfile]:
+    if profile_data is None:
+        return None
+    if isinstance(profile_data, dict):
+        source = profile_data
+    else:
+        try:
+            source = profile_data.item()
+        except Exception:
+            try:
+                source = dict(profile_data)
+            except Exception:
+                return None
+    filtered = {k: source.get(k) for k in _PROFILE_FIELDS if k in source}
+    if not filtered:
+        return None
+    try:
+        return UserProfile(**filtered)
+    except TypeError:
+        return None
+
+
+def _call_policy_predict(
+    policy,
+    obs: np.ndarray,
+    *,
+    n_actions: int | None = None,
+) -> int:
+    fn = getattr(policy, "predict", None)
+    if fn is None:
+        for name in ("predict_action", "sample_action"):
+            if hasattr(policy, name):
+                fn = getattr(policy, name)
+                break
+    if fn is None or not callable(fn):
+        raise TypeError("Policy has no predict/predict_action/sample_action method.")
+
+    kwargs: dict[str, Any] = {}
+    try:
+        sig = inspect.signature(fn)
+        if "deterministic" in sig.parameters:
+            kwargs["deterministic"] = True
+    except (TypeError, ValueError):
+        pass
+
+    out = fn(obs, **kwargs) if kwargs else fn(obs)
+
+    try:
+        import torch
+
+        if hasattr(out, "detach") and torch.is_tensor(out):
+            out = out.detach().cpu().numpy()
+    except Exception:
+        pass
+
+    if isinstance(out, (list, tuple)):
+        out = out[0]
+    arr = np.asarray(out)
+
+    if arr.dtype.kind in ("i", "u"):
+        return int(np.squeeze(arr))
+
+    if arr.ndim == 2 and arr.shape[0] == 1 and (
+        n_actions is None or arr.shape[1] == n_actions
+    ):
+        return int(np.argmax(arr[0]))
+
+    if arr.ndim == 1 and (n_actions is None or arr.shape[0] == n_actions):
+        return int(np.argmax(arr))
+
+    return int(np.squeeze(arr))
+
+
+def _rollout_policy(
+    policy,
+    env,
+    steps: int,
+    user_profile: UserProfile,
+    *,
+    n_actions: int,
+):
+    info = env.reset()
+    if user_profile is None:
+        raise ValueError("无法从行为元数据构建 user profile，回测终止。")
+    user_vector = make_up_to_vec(user_profile)
+    rets: list[float] = []
+    import torch
+
+    with torch.no_grad():
+        for _ in range(steps):
+            state_vec = build_state_vec(
+                mkt_features=info["mkt_sshot"],
+                user_profile=user_profile,
+                curr_alloc=info["curr_alloc"],
+                user_vector=user_vector,
+            )
+            obs = np.asarray(state_vec, dtype=np.float32).reshape(1, -1)
+            act = _call_policy_predict(policy, obs, n_actions=n_actions)
+            if not (0 <= act < n_actions):
+                raise ValueError(
+                    f"Predicted action {act} out of range [0, {n_actions - 1}]"
+                )
+            market_return, terminated, next_info = env.step(int(act))
+            rets.append(float(next_info.get("market_return", market_return)))
+            info = next_info
+            if terminated:
+                break
+    return np.asarray(rets, np.float64)
+
+
+def _series_to_metrics(step_returns: np.ndarray):
+    if step_returns.size == 0:
+        return {
+            "total_return": 0.0,
+            "max_drawdown": 0.0,
+            "vol": 0.0,
+            "sharpe": 0.0,
+            "cvar5": 0.0,
+            "mean_step_return": 0.0,
+            "n_steps": 0,
+        }
+    equity = np.cumprod(np.clip(1.0 + step_returns, 1e-6, None))
+    peak = np.maximum.accumulate(equity)
+    dd = equity / np.clip(peak, 1e-6, None) - 1.0
+    total = float(equity[-1] - 1.0)
+    max_dd = float(dd.min())
+    mu = float(step_returns.mean())
+    sd = float(step_returns.std(ddof=1))
+    vol = sd * np.sqrt(252.0)
+    if sd > 1e-8:
+        sharpe = float(mu / sd * np.sqrt(252.0))
+    else:
+        sharpe = 0.0
+    q = np.quantile(step_returns, 0.05)
+    tail = step_returns[step_returns <= q]
+    cvar5 = float(tail.mean()) if tail.size else float(q)
+    return {
+        "total_return": total,
+        "max_drawdown": max_dd,
+        "vol": vol,
+        "sharpe": sharpe,
+        "cvar5": cvar5,
+        "mean_step_return": mu,
+        "n_steps": int(step_returns.size),
+    }
+
+
+def run_backtest(
+    policy,
+    behavior_meta_path: Optional[str],
+    dataset_path: str,
+    policy_name: str,
+    action_size: Optional[int] = None,
+    max_episodes: Optional[int] = None,
+    behavior_profiles: Optional[list[dict[str, Any]]] = None,
+    seed: Optional[int] = None,
+):
+    if policy is None:
+        return {}
+    if not behavior_meta_path or not os.path.exists(behavior_meta_path):
+        raise FileNotFoundError("回测必须提供验证集行为 meta 文件。")
+
+    card_ids = sorted(card.act_id for card in build_card_factory())
+    assert card_ids == list(range(len(card_ids))), "ActCard.act_id 未覆盖连续编号。"
+    resolved_action_size = action_size if action_size is not None else len(card_ids)
+    if resolved_action_size != len(card_ids):
+        raise AssertionError(
+            "模型 action_size 与卡片数量不一致，无法回测。"
+        )
+    n_actions = int(resolved_action_size)
+
+    actual_seed = int(
+        seed
+        if seed is not None
+        else os.environ.get("BACKTEST_SEED", os.environ.get("VAL_START_SEED", "0"))
+    )
+    _set_global_seeds(actual_seed)
+    policy_impl = getattr(policy, "impl", None)
+    if hasattr(policy, "eval"):
+        policy.eval()
+    elif policy_impl is not None and hasattr(policy_impl, "eval"):
+        policy_impl.eval()
+
+    if behavior_profiles is None:
+        behavior_profiles = _load_behavior_profiles(behavior_meta_path) or []
+
+    try:
+        with np.load(behavior_meta_path, allow_pickle=True) as meta:
+            starts = meta["episode_start_idx"].astype(int)
+            steps_arr = meta.get("episode_steps")
+            steps = int(steps_arr[0]) if steps_arr is not None and len(steps_arr) else 252
+            splits = meta.get("episode_split")
+    except Exception as exc:  # pragma: no cover
+        print("[eval_policy] 回测读取行为 meta 失败：", exc)
+        return {}
+
+    if starts.size == 0:
+        raise RuntimeError("行为 meta 中没有 episode_start_idx，无法回测。")
+
+    if splits is not None:
+        uniq = np.unique(splits.astype(str))
+        if len(uniq) == 1 and uniq[0].lower() != "val":
+            raise RuntimeError("回测必须使用验证集窗口，如 meta 中 split ≠ val。")
+
+    if max_episodes is not None:
+        starts = starts[:max_episodes]
+        behavior_profiles = behavior_profiles[:max_episodes]
+
+    profile_objs: list[Optional[UserProfile]] = [
+        _dict_to_user_profile(profile) for profile in behavior_profiles
+    ]
+
+    def _build_env(start_idx: int):
+        env_vars = {
+            "EPISODE_START_MODE": "fixed",
+            "EPISODE_FIXED_START": str(start_idx),
+            "EPISODE_START_SEED": "0",
+            "EPISODE_START_POOL": "all",
+        }
+        old_env = {key: os.environ.get(key) for key in env_vars}
+        os.environ.update(env_vars)
+        try:
+            return MarketEnv(max_episode_steps=steps)
+        finally:
+            for key, old in old_env.items():
+                if old is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = old
+
+    metadata_module = policy_impl if policy_impl is not None else policy
+    device = getattr(metadata_module, "device", "cpu")
+    scaler_name = _observation_scaler_name(policy)
+    print(
+        "[eval_policy] 验证集回测",
+        f"dataset={dataset_path}",
+        f"episodes_to_consider={len(starts)}",
+        f"seed={actual_seed}",
+        f"device={device}",
+        f"obs_scaler={scaler_name}",
+    )
+
+    rows: list[dict[str, Any]] = []
+    for ep_id, start_idx in enumerate(starts):
+        if ep_id >= len(profile_objs) or profile_objs[ep_id] is None:
+            print(
+                f"[eval_policy] 回测跳过 episode {ep_id}：缺少合法 user_profile。"
+            )
+            continue
+        env = _build_env(int(start_idx))
+        step_rets = _rollout_policy(
+            policy,
+            env,
+            steps,
+            profile_objs[ep_id],
+            n_actions=n_actions,
+        )
+        metrics = _series_to_metrics(step_rets)
+        risk_bucket = getattr(profile_objs[ep_id], "risk_bucket", None)
+        rows.append(
+            {
+                "episode_id": ep_id,
+                "episode_start_idx": int(start_idx),
+                "policy": policy_name,
+                "split": "val",
+                "seed": actual_seed,
+                "age": getattr(profile_objs[ep_id], "age", None),
+                "risk_bucket": int(risk_bucket) if risk_bucket is not None else None,
+                **metrics,
+            }
+        )
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return {"overall": {"n_episodes": 0}, "by_risk_bucket": {}, "per_episode": []}
+
+    def _agg(group):
+        return {
+            "n_episodes": int(len(group)),
+            "avg_total_return": float(group["total_return"].mean()),
+            "avg_max_drawdown": float(group["max_drawdown"].mean()),
+            "avg_sharpe": float(group["sharpe"].mean()),
+            "avg_cvar5": float(group["cvar5"].mean()),
+        }
+
+    overall = _agg(df)
+    by_bucket: dict[str, Any] = {}
+    if "risk_bucket" in df.columns:
+        for bucket, sub in df.dropna(subset=["risk_bucket"]).groupby("risk_bucket"):
+            by_bucket[str(int(bucket))] = _agg(sub)
+    return {
+        "overall": overall,
+        "by_risk_bucket": by_bucket,
+        "per_episode": df.to_dict(orient="records"),
+        "meta": {
+            "seed": actual_seed,
+            "device": str(device),
+            "observation_scaler": scaler_name,
+            "reward_scale_applied": 0,
+            "split": "val",
+            "policy": policy_name,
+        },
+    }
+
+
 def main() -> None:
     args = parse_args()
 
@@ -342,6 +698,8 @@ def main() -> None:
         behavior_profiles,
         len(replay_buffer.episodes),
     )
+    dataset_info = getattr(replay_buffer, "dataset_info", None)
+    dataset_action_size = getattr(dataset_info, "action_size", None)
     policy = None
     if model_path:
         policy = load_trained_policy(
@@ -407,7 +765,48 @@ def main() -> None:
         episode_bucket_map,
         reward_scale_fallback=reward_scale,
     )
-    summary["risk_metrics"] = _build_risk_metrics(episode_df)
+    risk_behavior = _build_risk_metrics(episode_df)
+    summary["risk_metrics_behavior"] = risk_behavior
+    summary.pop("risk_metrics", None)
+    print(
+        "[eval_policy] NOTE: risk_metrics removed; use risk_metrics_behavior for baseline "
+        "and backtest_metrics_policy for trained policy."
+    )
+
+    if args.backtest and args.policy == "trained" and policy is not None:
+        print("--- 环境回测 ---")
+        bt = run_backtest(
+            policy,
+            behavior_meta_path,
+            args.dataset,
+            os.path.basename(args.model) or "policy",
+            action_size=dataset_action_size,
+            max_episodes=args.backtest_episodes,
+            behavior_profiles=behavior_profiles,
+            seed=args.backtest_seed,
+        )
+        if bt:
+            summary["backtest_metrics_policy"] = {
+                k: v for k, v in bt.items() if k != "per_episode"
+            }
+            per_ep = bt.get("per_episode")
+            backtest_csv = None
+            if per_ep:
+                df = pd.DataFrame(per_ep)
+                model_dir = os.path.dirname(args.model) or "."
+                os.makedirs(model_dir, exist_ok=True)
+                out_csv = os.path.join(
+                    model_dir,
+                    f"{os.path.basename(args.model)}.backtest_val.csv",
+                )
+                df.to_csv(out_csv, index=False)
+                backtest_csv = out_csv
+                print(f"[eval_policy] 回测逐集 CSV 已写入 {out_csv}")
+            if backtest_csv:
+                summary["backtest_metrics_policy"]["csv_path"] = backtest_csv
+        else:
+            summary["backtest_metrics_policy"] = {}
+        summary["backtest_metrics"] = summary["backtest_metrics_policy"]
 
     print("\n=== 评估结果 ===")
     summary_text = json.dumps(summary, ensure_ascii=False, indent=2)
