@@ -5,7 +5,7 @@ import sys
 from typing import Optional, Tuple
 
 import numpy as np
-
+from d3rlpy import load_learnable
 from d3rlpy.algos import (
     DiscreteBCConfig,
     DiscreteBCQConfig,
@@ -190,6 +190,25 @@ def load_policy_artifact(
         require_gpu=require_gpu,
         action_size=act_size,
     )
+    return policy
+
+
+def load_policy_inference(
+    artifact_path: str,
+    *,
+    require_gpu: bool = False,
+):
+    """
+    仅用于推理的轻量策略加载。
+
+    该函数假设在训练阶段已经通过 algo.save(...) 将策略
+    与对应的 scaler 一并序列化到 artifact_path 中。
+    加载时不再读取 ReplayBuffer / 拟合 scaler，从而降低前端冷启动开销。
+    """
+    if not os.path.exists(artifact_path):
+        raise FileNotFoundError(f"未找到推理策略文件：{artifact_path}")
+    device = 0 if require_gpu else False
+    policy = load_learnable(artifact_path, device=device)
     return policy
 def load_training_config(model_path: str) -> dict:
     candidates = [f"{model_path}.config.json"]
