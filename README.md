@@ -28,8 +28,8 @@ pip install -r requirements.txt
 3. 运行以下命令启动本地 UI（默认监听 8501 端口）：
 
 ```bash
-export PYTHONPATH=./src  # 或者先执行 `pip install -e .`
-python -m streamlit run hybrid_advisor_offline/ux/demo_streamlit.py
+在项目根目录：
+streamlit run src/hybrid_advisor_offline/ux/demo_streamlit.py
 ```
 
 左侧面板用于输入客户画像与目标组合、记录自然语言偏好；右侧支持**客户版**与**审计版**两种视图：
