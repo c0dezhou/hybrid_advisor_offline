@@ -192,16 +192,37 @@ def _ensure_gguf_model():
 
 def _build_messages(text: str, context: Dict[str, Any]) -> Tuple[str, str]:
     sys_prompt = (
-        "你是银行投顾文案润色助手。请在保留合规表述、不加入承诺性词语的前提下，"
-        "让解释更自然、强调风险匹配度，让普通人更易读懂。输出仅包含润色后的中文文本。"
-        "增加区分度和说服力"
+        "你是银行投顾文案润色助手。"
+        "目标是在保留原始含义和合规前提下，把说明改写得更具体、有区分度、易被客户采纳，"
+        "但绝不加入任何收益承诺或夸大表述。"
+        "输出为 1 段 2–3 句的中文自然语言，不要使用项目符号或小标题。"
     )
+    risk_bucket = RISK_LABELS.get(context.get("user_risk_bucket"), "未知")
+    card_risk = RISK_LABELS.get(context.get("card_risk_level"), "未知")
+    alloc_str = _format_alloc(context.get("target_alloc")) or "未提供"
+    horizon = context.get("horizon_years")
+    equity_cap = context.get("equity_cap")
+    risk_hint = context.get("risk_hint")
+
+    horizon_part = f"\n客户投资期限偏好：约 {horizon} 年" if isinstance(horizon, (int, float)) else ""
+    cap_part = (
+        f"\n系统推断的股票上限：约 {int(equity_cap * 100)}%"
+        if isinstance(equity_cap, (int, float)) and equity_cap > 0
+        else ""
+    )
+    risk_hint_part = f"\n客户自然语言偏好提示：{risk_hint}" if risk_hint else ""
+
     user_prompt = (
-        f"客户风险等级：{RISK_LABELS.get(context.get('user_risk_bucket'), '未知')}\n"
-        f"卡片风险等级：{RISK_LABELS.get(context.get('card_risk_level'), '未知')}\n"
-        f"目标配置：{_format_alloc(context.get('target_alloc')) or '未提供'}\n"
+        f"客户风险等级：{risk_bucket}\n"
+        f"卡片风险等级：{card_risk}\n"
+        f"目标配置：{alloc_str}{horizon_part}{cap_part}{risk_hint_part}\n"
         f"原始文案：{text.strip()}\n"
-        "请在保持含义不变、严格避免夸大承诺的情况下，润色为 1 段中文说明。"
+        "请在保持核心含义不变、严格避免夸大或保证收益的前提下，"
+        "润色为 1 段 2–3 句的中文说明："
+        "1) 明确点出这是偏保守/稳健/进取的选择；"
+        "2) 至少引用一次具体的资产配置数字；"
+        "3) 若提供了投资期限或股票上限，请解释为什么该配置与之匹配；"
+        "4) 避免空泛的套话，例如“实现财富自由”“收益最大化”等。"
     )
     return sys_prompt, user_prompt
 

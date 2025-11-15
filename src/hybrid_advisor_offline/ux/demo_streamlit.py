@@ -37,21 +37,39 @@ from hybrid_advisor_offline.engine.personal.personal_prior import (
     infer_prefs_from_profile,
 )
 from hybrid_advisor_offline.engine.policy.explain import build_explain_pack
+from hybrid_advisor_offline.engine.policy.policy_based_rule import policy_based_rule
 from hybrid_advisor_offline.engine.state.state_builder import (
     MarketSnapshot,
     UserProfile,
     build_state_vec,
 )
 from hybrid_advisor_offline.offline.analysis.segment_metrics import plot_segment_bars
-from hybrid_advisor_offline.offline.eval.policy_loader import load_policy_artifact
+from hybrid_advisor_offline.offline.eval.policy_loader import (
+    load_policy_artifact,
+    load_policy_inference,
+)
 
-PAGE_ICON = "🧭"
+PAGE_ICON = "🐱"
 TOP_K = 3
 REPORTS_DIR = Path("./reports")
+VIEW_MODE_CUSTOMER = "customer"
+VIEW_MODE_AUDIT = "audit"
 MODEL_REGISTRY = {
-    "bcq": {"label": "BCQ（默认）", "path": Path("./models/bcq_reward_personal.pt")},
-    "bc": {"label": "BC", "path": Path("./models/bc_reward_personal.pt")},
-    "cql": {"label": "CQL", "path": Path("./models/cql_reward_personal.pt")},
+    "bcq": {
+        "label": "BCQ（默认）",
+        "path": Path("./models/bcq_reward_personal.pt"),
+        "inference_path": Path("./models/bcq_reward_personal.pt.inference.d3"),
+    },
+    "bc": {
+        "label": "BC",
+        "path": Path("./models/bc_reward_personal.pt"),
+        "inference_path": Path("./models/bc_reward_personal.pt.inference.d3"),
+    },
+    "cql": {
+        "label": "CQL",
+        "path": Path("./models/cql_reward_personal.pt"),
+        "inference_path": Path("./models/cql_reward_personal.pt.inference.d3"),
+    },
 }
 MODEL_ORDER = ["bcq", "bc", "cql"]
 DEFAULT_MODEL_KEY = "bcq"
@@ -195,7 +213,11 @@ def _load_snapshot():
 @st.cache_resource(show_spinner=True)
 def _load_policy(model_key: str):
     config = MODEL_REGISTRY[model_key]
-    policy = load_policy_artifact(str(config["path"]), require_gpu=False)
+    infer_path = config.get("inference_path")
+    if infer_path is not None and infer_path.exists():
+        policy = load_policy_inference(str(infer_path), require_gpu=False)
+    else:
+        policy = load_policy_artifact(str(config["path"]), require_gpu=False)
     return policy
 
 
@@ -215,13 +237,25 @@ def _collect_user_inputs(container) -> Dict:
     loan = container.radio("消费贷款", ["yes", "no"], index=1, horizontal=True)
     default = container.radio("历史违约", ["no", "yes"], index=0, horizontal=True)
 
-    alloc_templates = {
-        "稳健型 (40/40/20)": (0.4, 0.4, 0.2),
-        "保守型 (20/30/50)": (0.2, 0.3, 0.5),
-        "进取型 (60/30/10)": (0.6, 0.3, 0.1),
-    }
-    alloc_label = container.selectbox("当前组合", list(alloc_templates.keys()), index=0)
-    current_alloc = np.array(alloc_templates[alloc_label], dtype=np.float32)
+    container.subheader("当前组合（可选）")
+    container.caption("如不确定，可先保留默认配置，系统会视为近似当前状态。")
+    stock_pct = container.slider("股票占比 (%)", min_value=0, max_value=100, value=40, step=5)
+    max_bond = max(0, 100 - stock_pct)
+    if max_bond > 0:
+        bond_default = min(40, max_bond)
+        bond_pct = container.slider(
+            "债券占比 (%)",
+            min_value=0,
+            max_value=max_bond,
+            value=bond_default,
+            step=1,
+        )
+    else:
+        bond_pct = 0
+        container.caption("当前股票占比为 100%，债券占比固定为 0%。")
+    cash_pct = max(0, 100 - stock_pct - bond_pct)
+    container.caption(f"现金占比将自动补齐为 {cash_pct}% ，保证三项合计为 100%。")
+    current_alloc = np.array([stock_pct, bond_pct, cash_pct], dtype=np.float32) / 100.0
 
     profile = UserProfile(
         age=age,
@@ -243,6 +277,55 @@ def _collect_user_inputs(container) -> Dict:
 def _format_percentage_vector(vec: List[float]) -> str:
     parts = [f"{int(x * 100):02d}%" for x in vec]
     return f"股票 {parts[0]} / 债券 {parts[1]} / 现金 {parts[2]}"
+
+
+def _personal_fit_label(profile: UserProfile, card, prefs: Mapping[str, Any]) -> tuple[str, str]:
+    equity_cap = prefs.get("equity_cap")
+    if equity_cap is None:
+        equity_cap = {0: 0.4, 1: 0.6, 2: 0.8}.get(profile.risk_bucket, 0.6)
+    target_equity = float(card.target_alloc[0])
+    diff = target_equity - equity_cap
+    cap_pct = int(equity_cap * 100)
+    eq_pct = int(target_equity * 100)
+    if diff > 0.1:
+        return "偏高", f"该组合股票约 {eq_pct}%，明显高于系统推断的股票上限 {cap_pct}%。"
+    if diff < -0.2:
+        return "偏保守", f"该组合股票约 {eq_pct}%，显著低于您可承受的股票上限 {cap_pct}%，更偏向稳健。"
+    return "匹配", f"该组合股票约 {eq_pct}%，基本落在您可承受的股票上限 {cap_pct}% 附近。"
+
+
+def _baseline_improvement_label(
+    act_id: int,
+    teacher_act_id: int | None,
+    masked_q: np.ndarray,
+) -> tuple[str, str]:
+    if teacher_act_id is None or not (0 <= teacher_act_id < len(masked_q)):
+        return "模型推荐", "该组合由离线策略在综合考虑收益与风险后给出，作为当前状态下的优先备选方案。"
+    if act_id == teacher_act_id:
+        return "与规则一致", "该组合与规则策略给出的配置一致，在当前市场与风险条件下是基础方案。"
+    delta = float(masked_q[act_id] - masked_q[teacher_act_id])
+    if delta > 0.2:
+        return "明显提升", "相较于规则策略，该组合在模型评估下综合收益/风险有较为明显的提升。"
+    if delta > 0.0:
+        return "略有提升", "相较于规则策略，该组合在模型评估下综合表现略有提升，可作为替代方案。"
+    return "备选方案", "该组合在模型评估下与规则策略相近或略逊，作为风险偏好不同情况下的备选方案。"
+
+
+def _build_customer_reasons(
+    profile: UserProfile,
+    card,
+    prefs: Mapping[str, Any],
+    baseline_label: str,
+    baseline_reason: str,
+) -> List[str]:
+    risk_label_text = ["保守", "稳健", "进取"][card.risk_level]
+    personal_fit_label, personal_fit_reason = _personal_fit_label(profile, card, prefs)
+    reasons = [
+        f"策略风险：{risk_label_text}，在系统可用卡片中属于该风险档位的配置。",
+        f"与您画像的匹配度：{personal_fit_label}。{personal_fit_reason}",
+        f"相对规则策略：{baseline_label}。{baseline_reason}",
+    ]
+    return reasons
 
 
 def _list_report_files(pattern: str) -> List[Path]:
@@ -310,6 +393,7 @@ def render_recommendations(
     profile: UserProfile,
     current_alloc: np.ndarray,
     extra_prefs: Mapping[str, Any] | None = None,
+    view_mode: str = VIEW_MODE_CUSTOMER,
 ):
     state_vec = build_state_vec(snapshot, profile, current_alloc)
     q_values = _predict_q_values(policy, state_vec)
@@ -339,15 +423,20 @@ def render_recommendations(
                 prior_vec[act_id] = bump
         masked_q = masked_q + prior_vec
 
+    try:
+        teacher_act_id, _ = policy_based_rule(
+            state_vec,
+            allowed_cards,
+            profile.risk_bucket,
+            exploration_rate=0.0,
+        )
+    except Exception:
+        teacher_act_id = None
+
     ranked_ids = sorted(allowed_ids, key=lambda aid: masked_q[aid], reverse=True)
     if not ranked_ids:
         st.warning("当前约束下没有可用的动作卡片，请调整输入。")
         return
-
-    if translator_enabled():
-        st.info("文案润色：已开启（USE_LLM_TRANSLATOR=1）", icon="✨")
-    else:
-        st.info("文案润色：关闭，可设置 USE_LLM_TRANSLATOR=1 启用。", icon="💬")
 
     pref_tags = _describe_prefs(merged_prefs)
     if pref_tags:
@@ -357,39 +446,67 @@ def render_recommendations(
     for idx, act_id in enumerate(ranked_ids[:TOP_K], start=1):
         card = get_card_by_id(act_id)
         explain_pack = build_explain_pack(card, profile.risk_bucket)
+        translator_context = {
+            "card_id": card.card_id,
+            "card_risk_level": card.risk_level,
+            "user_risk_bucket": profile.risk_bucket,
+            "target_alloc": card.target_alloc,
+            "risk_hint": merged_prefs.get("risk_hint"),
+            "horizon_years": merged_prefs.get("horizon_years"),
+            "equity_cap": merged_prefs.get("equity_cap"),
+        }
         explain_text, translator_meta = refine_text(
             explain_pack["customer_friendly_text"],
-            {
-                "card_id": card.card_id,
-                "card_risk_level": card.risk_level,
-                "user_risk_bucket": profile.risk_bucket,
-                "target_alloc": card.target_alloc,
-            },
+            translator_context,
         )
         q_score = float(masked_q[act_id])
         hash_digest = hashlib.sha256(explain_pack["audit_text"].encode("utf-8")).hexdigest()[:12]
+        baseline_label, baseline_reason = _baseline_improvement_label(
+            act_id,
+            teacher_act_id,
+            masked_q,
+        )
         with st.container(border=True):
-            st.write(f"**#{idx} · {card.card_id}** ｜ 目标配置 {_format_percentage_vector(card.target_alloc)}")
-            cols = st.columns([1, 1, 1])
-            cols[0].metric("模型 Q 值", f"{q_score:.3f}")
-            cols[1].metric("策略风险", ["保守", "稳健", "进取"][card.risk_level])
-            cols[2].metric("审计摘要哈希", hash_digest)
+            if view_mode == VIEW_MODE_AUDIT:
+                title = f"**#{idx} · {card.card_id}** ｜ 目标配置 {_format_percentage_vector(card.target_alloc)}"
+            else:
+                title = f"**推荐 #{idx}** ｜ 目标配置 {_format_percentage_vector(card.target_alloc)}"
+            st.write(title)
+            if view_mode == VIEW_MODE_AUDIT:
+                cols = st.columns([1, 1, 1])
+                cols[0].metric("模型 Q 值", f"{q_score:.3f}")
+                cols[1].metric("策略风险", ["保守", "稳健", "进取"][card.risk_level])
+                cols[2].metric("审计摘要哈希", hash_digest)
+            else:
+                cols = st.columns([1])
+                cols[0].metric("策略风险", ["保守", "稳健", "进取"][card.risk_level])
             st.caption(explain_text)
-            if translator_meta not in ("translator_disabled", "translator_no_change"):
+            if view_mode == VIEW_MODE_CUSTOMER:
+                reasons = _build_customer_reasons(
+                    profile,
+                    card,
+                    merged_prefs,
+                    baseline_label,
+                    baseline_reason,
+                )
+                for reason in reasons:
+                    st.markdown(f"- {reason}")
+            if view_mode == VIEW_MODE_AUDIT and translator_meta not in ("translator_disabled", "translator_no_change"):
                 st.caption(f"（文案润色：{translator_meta}）")
 
-    st.markdown("---")
-    st.markdown("#### 合规可用动作的 Q 值分布")
-    df = pd.DataFrame(
-        {
-            "card_id": [get_card_by_id(aid).card_id for aid in allowed_ids],
-            "q_value": [float(masked_q[aid]) for aid in allowed_ids],
-        }
-    ).sort_values("q_value", ascending=False)
-    st.bar_chart(df, x="card_id", y="q_value", color="#4B8BBE")
+    if view_mode == VIEW_MODE_AUDIT:
+        st.markdown("---")
+        st.markdown("#### 合规可用动作的 Q 值分布")
+        df = pd.DataFrame(
+            {
+                "card_id": [get_card_by_id(aid).card_id for aid in allowed_ids],
+                "q_value": [float(masked_q[aid]) for aid in allowed_ids],
+            }
+        ).sort_values("q_value", ascending=False)
+        st.bar_chart(df, x="card_id", y="q_value", color="#4B8BBE")
 
-    with st.expander("原始客户画像 / 状态向量特征"):
-        st.json({"profile": asdict(profile), "current_alloc": current_alloc.tolist()})
+        with st.expander("原始客户画像 / 状态向量特征"):
+            st.json({"profile": asdict(profile), "current_alloc": current_alloc.tolist()})
 
 
 def render_analysis_tab():
@@ -406,9 +523,9 @@ def main():
         page_icon=PAGE_ICON,
         layout="wide",
     )
-    st.title("Hybrid Advisor Offline · 前端演示")
+    st.title("你的投资建议助手")
     st.caption(
-        "离线策略 + 合规安全壳。输入客户画像即可查看推荐卡片、Q 值与审计摘要。"
+        "离线策略 + 合规安全壳。支持客户版（仅展示推荐与风险提示）与审计版（包含 Q 值与审计哈希等内部信息）。"
     )
 
     model_options = [key for key in MODEL_ORDER if key in MODEL_REGISTRY] or list(MODEL_REGISTRY.keys())
@@ -432,6 +549,16 @@ def main():
 
     _init_session_state()
 
+    view_mode_label = st.sidebar.radio(
+        "展示模式",
+        (
+            "客户版：仅展示推荐与风险提示",
+            "审计版：包含 Q 值与哈希等内部信息",
+        ),
+        index=0,
+    )
+    view_mode = VIEW_MODE_CUSTOMER if view_mode_label.startswith("客户版") else VIEW_MODE_AUDIT
+
     tab_reco, tab_analysis = st.tabs(["实时推荐", "千人千面分析"])
     with tab_reco:
         col_left, col_right = st.columns([0.42, 0.58], gap="large")
@@ -449,12 +576,18 @@ def main():
         _render_preference_chat(col_left)
 
         with col_right:
+            if view_mode == VIEW_MODE_CUSTOMER:
+                # col_right.info("当前为【客户版】视图，不展示 Q 值和审计哈希等内部模型细节。", icon="👀")
+                col_right.info("投资组合建议", icon="🎆")
+            else:
+                col_right.info("当前为【审计版】视图，展示 Q 值、审计哈希等内部信息，仅供内部使用。", icon="🔍")
             render_recommendations(
                 policy,
                 snapshot,
                 profile=inputs["profile"],
                 current_alloc=inputs["current_alloc"],
                 extra_prefs=st.session_state["chat_prefs"],
+                view_mode=view_mode,
             )
 
     with tab_analysis:
