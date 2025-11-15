@@ -31,6 +31,8 @@ env/
 logs/
 *.out
 *.err
+bak/
+
 
 # ── 训练/实验产物
 runs/      

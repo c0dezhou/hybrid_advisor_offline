@@ -1,0 +1,16 @@
+numpy
+pandas
+torch
+d3rlpy>=2.8
+gym
+
+streamlit>=1.30
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# llm润色（按需，可按需安装/删减）
+transformers
+huggingface_hub
+accelerate
+bitsandbytes
+llama-cpp-python
