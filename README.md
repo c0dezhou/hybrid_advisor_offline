@@ -3,6 +3,13 @@ Hybrid Advisor Offline
 
 混合式合规投顾离线实验框架。项目内已经包含数据生成与 **BCQ 为主** 的离线策略训练与评估脚本（同时保留 BC / CQL 作为对比基线），并提供了可切换“客户版 / 审计版”的前端演示与影子接口，方便将离线策略接入业务或审计流程。
 
+一键部署脚本：src/scripts/pipeline_with_sleep.sh
+执行一键部署：
+chmod +x pipeline_with_sleep.sh
+./pipeline_with_sleep.sh
+
+======================
+
 依赖准备
 --------
 
