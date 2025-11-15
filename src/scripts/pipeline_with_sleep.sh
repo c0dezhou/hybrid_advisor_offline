@@ -21,6 +21,7 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
 export CUBLAS_WORKSPACE_CONFIG=":16:8"
 export BASELINE_EVAL="${BASELINE_EVAL:-1}"
+
 python - <<'PY'
 import importlib, json, os, platform, subprocess, sys
 
@@ -178,6 +179,7 @@ run_eval() {
     --fqe-steps "$FQE_STEPS"
     --eval-interval "$EVAL_INTERVAL"
     --validation-ratio "$VALIDATION_RATIO"
+    --backtest-episodes 2000
     --summary-output "$summary_path"
   )
   if [[ -n "$model" ]]; then
@@ -192,142 +194,143 @@ run_eval() {
     cmd+=("${EXTRA_EVAL_ARGS[@]}")
   fi
   "${cmd[@]}" | tee "$log_path"
+  # "${cmd[@]}" 2>&1 | tee "$log_path"
 
   echo "评估结果 JSON 已写入 ${summary_path}"
   cleanup
 }
 
-# step "1a) 生成训练集 (start_filter=${TRAIN_START_FILTER}, seed=${TRAIN_START_SEED})"
-# EPISODE_START_RANGE="${TRAIN_START_RANGE}" \
-# EPISODE_START_SEED="$TRAIN_START_SEED" \
-# python -m hybrid_advisor_offline.offline.trainrl.gen_datasets \
-#   --dataset-path "$TRAIN_DATA" \
-#   --num-users "$NUM_USERS" \
-#   --episode-steps "$EPISODE_STEPS" \
-#   --epsilon "$EPSILON" \
-#   --split-name train \
-#   --start-filter "$TRAIN_START_FILTER" \
-#   --start-block-size "$START_BLOCK_SIZE"
-# cleanup
+step "1a) 生成训练集 (start_filter=${TRAIN_START_FILTER}, seed=${TRAIN_START_SEED})"
+EPISODE_START_RANGE="${TRAIN_START_RANGE}" \
+EPISODE_START_SEED="$TRAIN_START_SEED" \
+python -m hybrid_advisor_offline.offline.trainrl.gen_datasets \
+  --dataset-path "$TRAIN_DATA" \
+  --num-users "$NUM_USERS" \
+  --episode-steps "$EPISODE_STEPS" \
+  --epsilon "$EPSILON" \
+  --split-name train \
+  --start-filter "$TRAIN_START_FILTER" \
+  --start-block-size "$START_BLOCK_SIZE"
+cleanup
 
-# step "1b) 生成验证集 (start_filter=${VAL_START_FILTER}, seed=${VAL_START_SEED})"
-# EPISODE_START_RANGE="${VAL_START_RANGE}" \
-# EPISODE_START_SEED="$VAL_START_SEED" \
-# python -m hybrid_advisor_offline.offline.trainrl.gen_datasets \
-#   --dataset-path "$VAL_DATA" \
-#   --num-users "$VAL_NUM_USERS" \
-#   --episode-steps "$VAL_EPISODE_STEPS" \
-#   --epsilon "$VAL_EPSILON" \
-#   --split-name val \
-#   --start-filter "$VAL_START_FILTER" \
-#   --start-block-size "$START_BLOCK_SIZE"
-# cleanup
+step "1b) 生成验证集 (start_filter=${VAL_START_FILTER}, seed=${VAL_START_SEED})"
+EPISODE_START_RANGE="${VAL_START_RANGE}" \
+EPISODE_START_SEED="$VAL_START_SEED" \
+python -m hybrid_advisor_offline.offline.trainrl.gen_datasets \
+  --dataset-path "$VAL_DATA" \
+  --num-users "$VAL_NUM_USERS" \
+  --episode-steps "$VAL_EPISODE_STEPS" \
+  --epsilon "$VAL_EPSILON" \
+  --split-name val \
+  --start-filter "$VAL_START_FILTER" \
+  --start-block-size "$START_BLOCK_SIZE"
+cleanup
 
-# step "1c) 检查 train/val 时间窗是否重叠 (embargo=${EMBARGO_DAYS})"
-# if [[ "$FAST_RUN" == "1" ]]; then
-#   echo "[split_check] FAST_RUN=1，跳过 train/val 重叠校验。"
-# else
-#   python - "$TRAIN_META" "$VAL_META" "$EPISODE_STEPS" "$VAL_EPISODE_STEPS" "$EMBARGO_DAYS" "$START_BLOCK_SIZE" "$SPLIT_META_PATH" <<'PY'
-# import json
-# import os
-# import sys
-# import numpy as np
+step "1c) 检查 train/val 时间窗是否重叠 (embargo=${EMBARGO_DAYS})"
+if [[ "$FAST_RUN" == "1" ]]; then
+  echo "[split_check] FAST_RUN=1，跳过 train/val 重叠校验。"
+else
+  python - "$TRAIN_META" "$VAL_META" "$EPISODE_STEPS" "$VAL_EPISODE_STEPS" "$EMBARGO_DAYS" "$START_BLOCK_SIZE" "$SPLIT_META_PATH" <<'PY'
+import json
+import os
+import sys
+import numpy as np
 
-# train_meta, val_meta, default_train_steps, default_val_steps, embargo, block_size, report_path = sys.argv[1:]
-# default_train_steps = int(default_train_steps)
-# default_val_steps = int(default_val_steps)
-# embargo = int(embargo)
-# block_size = int(block_size)
+train_meta, val_meta, default_train_steps, default_val_steps, embargo, block_size, report_path = sys.argv[1:]
+default_train_steps = int(default_train_steps)
+default_val_steps = int(default_val_steps)
+embargo = int(embargo)
+block_size = int(block_size)
 
-# def load_meta(path, default_steps, label):
-#     if not os.path.exists(path):
-#         raise SystemExit(f"[split_check] 找不到 {label} 行为元数据：{path}")
-#     data = np.load(path, allow_pickle=True)
-#     starts = data.get("episode_start_idx")
-#     if starts is None:
-#         raise SystemExit(f"[split_check] {path} 缺少 episode_start_idx，无法校验时间窗。")
-#     steps_arr = data.get("episode_steps")
-#     steps = int(steps_arr[0]) if steps_arr is not None and len(steps_arr) else default_steps
-#     return {
-#         "starts": np.sort(starts.astype(np.int64)),
-#         "steps": steps,
-#     }
+def load_meta(path, default_steps, label):
+    if not os.path.exists(path):
+        raise SystemExit(f"[split_check] 找不到 {label} 行为元数据：{path}")
+    data = np.load(path, allow_pickle=True)
+    starts = data.get("episode_start_idx")
+    if starts is None:
+        raise SystemExit(f"[split_check] {path} 缺少 episode_start_idx，无法校验时间窗。")
+    steps_arr = data.get("episode_steps")
+    steps = int(steps_arr[0]) if steps_arr is not None and len(steps_arr) else default_steps
+    return {
+        "starts": np.sort(starts.astype(np.int64)),
+        "steps": steps,
+    }
 
-# def to_ranges(starts, steps, embargo_days):
-#     width = steps + embargo_days
-#     return [(int(s), int(s) + width) for s in starts]
+def to_ranges(starts, steps, embargo_days):
+    width = steps + embargo_days
+    return [(int(s), int(s) + width) for s in starts]
 
-# def scan_gap(r1, r2):
-#     i = j = 0
-#     min_gap = None
-#     while i < len(r1) and j < len(r2):
-#         a1, b1 = r1[i]
-#         a2, b2 = r2[j]
-#         if b1 <= a2:
-#             gap = a2 - b1
-#             min_gap = gap if min_gap is None else min(min_gap, gap)
-#             i += 1
-#         elif b2 <= a1:
-#             gap = a1 - b2
-#             min_gap = gap if min_gap is None else min(min_gap, gap)
-#             j += 1
-#         else:
-#             return True, None
-#     return False, (min_gap if min_gap is not None else 0)
+def scan_gap(r1, r2):
+    i = j = 0
+    min_gap = None
+    while i < len(r1) and j < len(r2):
+        a1, b1 = r1[i]
+        a2, b2 = r2[j]
+        if b1 <= a2:
+            gap = a2 - b1
+            min_gap = gap if min_gap is None else min(min_gap, gap)
+            i += 1
+        elif b2 <= a1:
+            gap = a1 - b2
+            min_gap = gap if min_gap is None else min(min_gap, gap)
+            j += 1
+        else:
+            return True, None
+    return False, (min_gap if min_gap is not None else 0)
 
-# train = load_meta(train_meta, default_train_steps, "train")
-# val = load_meta(val_meta, default_val_steps, "val")
+train = load_meta(train_meta, default_train_steps, "train")
+val = load_meta(val_meta, default_val_steps, "val")
 
-# train_ranges = to_ranges(train["starts"], train["steps"], embargo)
-# val_ranges = to_ranges(val["starts"], val["steps"], embargo)
+train_ranges = to_ranges(train["starts"], train["steps"], embargo)
+val_ranges = to_ranges(val["starts"], val["steps"], embargo)
 
-# overlap, min_gap = scan_gap(train_ranges, val_ranges)
-# start_overlap = len(np.intersect1d(train["starts"], val["starts"]))
+overlap, min_gap = scan_gap(train_ranges, val_ranges)
+start_overlap = len(np.intersect1d(train["starts"], val["starts"]))
 
-# report = {
-#     "train_meta": train_meta,
-#     "val_meta": val_meta,
-#     "episode_steps_train": train["steps"],
-#     "episode_steps_val": val["steps"],
-#     "embargo_days": embargo,
-#     "start_block_size": block_size,
-#     "n_train_episodes": int(len(train["starts"])),
-#     "n_val_episodes": int(len(val["starts"])),
-#     "start_idx_overlap": int(start_overlap),
-#     "start_idx_overlap_ok": bool(start_overlap == 0),
-#     "time_overlap": bool(overlap),
-#     "min_buffer_days": int(min_gap if min_gap is not None else 0),
-#     "min_buffer_ok": bool((min_gap if min_gap is not None else 0) >= embargo),
-# }
+report = {
+    "train_meta": train_meta,
+    "val_meta": val_meta,
+    "episode_steps_train": train["steps"],
+    "episode_steps_val": val["steps"],
+    "embargo_days": embargo,
+    "start_block_size": block_size,
+    "n_train_episodes": int(len(train["starts"])),
+    "n_val_episodes": int(len(val["starts"])),
+    "start_idx_overlap": int(start_overlap),
+    "start_idx_overlap_ok": bool(start_overlap == 0),
+    "time_overlap": bool(overlap),
+    "min_buffer_days": int(min_gap if min_gap is not None else 0),
+    "min_buffer_ok": bool((min_gap if min_gap is not None else 0) >= embargo),
+}
 
-# if overlap or start_overlap > 0:
-#     print(json.dumps(report, ensure_ascii=False, indent=2))
-#     raise SystemExit(
-#         "❌ Train/Val 时间区间或起点集合发生重叠，请增大 START_BLOCK_SIZE 或 EMBARGO_DAYS。"
-#     )
+if overlap or start_overlap > 0:
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    raise SystemExit(
+        "❌ Train/Val 时间区间或起点集合发生重叠，请增大 START_BLOCK_SIZE 或 EMBARGO_DAYS。"
+    )
 
-# os.makedirs(os.path.dirname(report_path), exist_ok=True)
-# with open(report_path, "w", encoding="utf-8") as fp:
-#     json.dump(report, fp, ensure_ascii=False, indent=2)
+os.makedirs(os.path.dirname(report_path), exist_ok=True)
+with open(report_path, "w", encoding="utf-8") as fp:
+    json.dump(report, fp, ensure_ascii=False, indent=2)
 
-# print(
-#     f"[split_check] OK：train/val 无重叠，最小缓冲 {report['min_buffer_days']} 天（包含 embargo={embargo}），"
-#     f"起点集合交集 {report['start_idx_overlap']}。"
-# )
-# PY
-# fi
-# cleanup
+print(
+    f"[split_check] OK：train/val 无重叠，最小缓冲 {report['min_buffer_days']} 天（包含 embargo={embargo}），"
+    f"起点集合交集 {report['start_idx_overlap']}。"
+)
+PY
+fi
+cleanup
 
-# step "1d) 补齐行为元数据字段"
-# python -m scripts.fix_behavior_meta \
-#   --behavior-meta "$TRAIN_META" \
-#   --output "$TRAIN_META" \
-#   --rule-eps "$EPSILON"
-# python -m scripts.fix_behavior_meta \
-#   --behavior-meta "$VAL_META" \
-#   --output "$VAL_META" \
-#   --rule-eps "$VAL_EPSILON"
-# cleanup
+step "1d) 补齐行为元数据字段"
+python -m scripts.fix_behavior_meta \
+  --behavior-meta "$TRAIN_META" \
+  --output "$TRAIN_META" \
+  --rule-eps "$EPSILON"
+python -m scripts.fix_behavior_meta \
+  --behavior-meta "$VAL_META" \
+  --output "$VAL_META" \
+  --rule-eps "$VAL_EPSILON"
+cleanup
 
 step "2) 训练 BC (reward_scale=${REWARD_SCALE})"
 python -m hybrid_advisor_offline.offline.trainrl.train_bc \
@@ -362,8 +365,8 @@ if [[ -f "$BC_BACKTEST" ]]; then
   python -m hybrid_advisor_offline.offline.analysis.fairness_audit \
     --backtest-csv "$BC_BACKTEST" \
     --profiles-npz "$VAL_META" \
-    --report-json "$REPORT_DIR/bc.fairness.json"
-  echo "[pipeline] 公平性审计报告已写入 $REPORT_DIR/bc.fairness.json"
+    --report-json "$REPORT_DIR/fairness_bc.json"
+  echo "[pipeline] 公平性审计报告已写入 $REPORT_DIR/fairness_bc.json"
 else
   echo "[pipeline] 跳过公平性审计，缺少 $BC_BACKTEST"
 fi
@@ -387,8 +390,8 @@ if [[ -f "$CQL_BACKTEST" ]]; then
   python -m hybrid_advisor_offline.offline.analysis.fairness_audit \
     --backtest-csv "$CQL_BACKTEST" \
     --profiles-npz "$VAL_META" \
-    --report-json "$REPORT_DIR/cql.fairness.json"
-  echo "[pipeline] 公平性审计报告已写入 $REPORT_DIR/cql.fairness.json"
+    --report-json "$REPORT_DIR/fairness_cql.json"
+  echo "[pipeline] 公平性审计报告已写入 $REPORT_DIR/fairness_cql.json"
 else
   echo "[pipeline] 跳过公平性审计，缺少 $CQL_BACKTEST"
 fi

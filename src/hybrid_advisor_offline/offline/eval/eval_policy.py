@@ -534,24 +534,6 @@ def run_backtest(
         _dict_to_user_profile(profile) for profile in behavior_profiles
     ]
 
-    def _build_env(start_idx: int):
-        env_vars = {
-            "EPISODE_START_MODE": "fixed",
-            "EPISODE_FIXED_START": str(start_idx),
-            "EPISODE_START_SEED": "0",
-            "EPISODE_START_POOL": "all",
-        }
-        old_env = {key: os.environ.get(key) for key in env_vars}
-        os.environ.update(env_vars)
-        try:
-            return MarketEnv(max_episode_steps=steps)
-        finally:
-            for key, old in old_env.items():
-                if old is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = old
-
     metadata_module = policy_impl if policy_impl is not None else policy
     device = getattr(metadata_module, "device", "cpu")
     scaler_name = _observation_scaler_name(policy)
@@ -564,6 +546,24 @@ def run_backtest(
         f"obs_scaler={scaler_name}",
     )
 
+    base_env_vars = {
+        "EPISODE_START_MODE": "fixed",
+        "EPISODE_FIXED_START": "0",
+        "EPISODE_START_SEED": "0",
+        "EPISODE_START_POOL": "all",
+    }
+    old_env = {key: os.environ.get(key) for key in base_env_vars}
+    os.environ.update(base_env_vars)
+    try:
+        env = MarketEnv(max_episode_steps=steps)
+    finally:
+        for key, old in old_env.items():
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+    env._start_mode = "fixed"
+
     rows: list[dict[str, Any]] = []
     for ep_id, start_idx in enumerate(starts):
         if ep_id >= len(profile_objs) or profile_objs[ep_id] is None:
@@ -571,7 +571,7 @@ def run_backtest(
                 f"[eval_policy] 回测跳过 episode {ep_id}：缺少合法 user_profile。"
             )
             continue
-        env = _build_env(int(start_idx))
+        env._fixed_start_idx = int(start_idx)
         step_rets = _rollout_policy(
             policy,
             env,

@@ -7,6 +7,8 @@ from typing import Tuple, Dict, Any
 from hybrid_advisor_offline.engine.act_safety.act_discrete_2_cards import get_card_by_id
 from hybrid_advisor_offline.engine.state.state_builder import MarketSnapshot
 
+_PRECOMPUTE_LOGGED = False
+
 DEFAULT_ALLOC = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 
 DATA_FILE = "./data/mkt_data.csv"
@@ -67,7 +69,10 @@ class MarketEnv:
         预先计算市场快照,
         提前计算好每一天对应的市场快照（包含30天滚动收益率、波动率等）
         """
-        print("为env预计算市场快照")
+        global _PRECOMPUTE_LOGGED
+        if not _PRECOMPUTE_LOGGED:
+            print("为env预计算市场快照")
+            _PRECOMPUTE_LOGGED = True
         self.mkt_sshots = []
         # 滚动计算的窗口
         window = 30

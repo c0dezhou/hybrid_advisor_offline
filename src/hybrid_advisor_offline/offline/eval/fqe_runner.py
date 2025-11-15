@@ -62,7 +62,7 @@ def run_fqe(
         "train_average_value": avg_eval(fqe, train_dataset),
     }
 
-    if val_dataset is not None: # 在验证集上计算
+    if val_dataset is not None:  # 在验证集上计算
         metrics["val_initial_state_value"] = init_eval(fqe, val_dataset)
         metrics["val_average_value"] = avg_eval(fqe, val_dataset)
 
