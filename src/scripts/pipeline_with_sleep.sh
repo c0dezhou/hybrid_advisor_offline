@@ -109,47 +109,6 @@ VAL_START_FILTER="${VAL_START_FILTER:-odd}"
 TRAIN_START_SEED="${TRAIN_START_SEED:-100}"
 VAL_START_SEED="${VAL_START_SEED:-200}"
 
-NUM_DAYS="$(
-  python - <<'PY'
-import pandas as pd, pathlib, sys
-
-path = pathlib.Path("./data/mkt_data.csv")
-if not path.exists():
-    sys.stdout.write("0")
-    sys.exit(0)
-df = pd.read_csv(path, usecols=[0])
-sys.stdout.write(str(len(df)))
-PY
-)"
-if [[ -z "$NUM_DAYS" || "$NUM_DAYS" -le 0 ]]; then
-  echo "[pipeline_with_sleep] 无法读取 data/mkt_data.csv，默认 NUM_DAYS=5207"
-  NUM_DAYS=5207
-fi
-MAX_START_IDX=$(( NUM_DAYS - MAX_EPISODE_STEPS ))
-if [[ "$MAX_START_IDX" -lt 0 ]]; then
-  MAX_START_IDX=0
-fi
-MAX_START_EXCLUSIVE=$(( MAX_START_IDX + 1 ))
-GAP=$(( EPISODE_STEPS + EMBARGO_DAYS * 2 ))
-if [[ "$MAX_START_IDX" -le "$GAP" ]]; then
-  TRAIN_RANGE_END=1
-else
-  TRAIN_RANGE_END=$(( (MAX_START_IDX - GAP) / 2 ))
-fi
-if [[ "$TRAIN_RANGE_END" -lt 1 ]]; then
-  TRAIN_RANGE_END=1
-fi
-VAL_RANGE_START=$(( TRAIN_RANGE_END + GAP ))
-if [[ "$VAL_RANGE_START" -ge "$MAX_START_EXCLUSIVE" ]]; then
-  VAL_RANGE_START=$(( MAX_START_EXCLUSIVE - 1 ))
-  if [[ "$VAL_RANGE_START" -le "$TRAIN_RANGE_END" ]]; then
-    VAL_RANGE_START=$(( TRAIN_RANGE_END + 1 ))
-  fi
-fi
-TRAIN_START_RANGE="0:${TRAIN_RANGE_END}"
-VAL_START_RANGE="${VAL_RANGE_START}:${MAX_START_EXCLUSIVE}"
-echo "[pipeline_with_sleep] EPISODE_START_RANGE train=${TRAIN_START_RANGE}, val=${VAL_START_RANGE}, GAP=${GAP}"
-
 step() {
   echo -e "\n========== $* =========="
 }
@@ -199,6 +158,79 @@ run_eval() {
   echo "评估结果 JSON 已写入 ${summary_path}"
   cleanup
 }
+
+step "0) 下载/准备 mkt 市场数据与 UCI 用户数据"
+python - <<'PY'
+import os
+
+from hybrid_advisor_offline.offline.trainrl.gen_datasets import (
+    DATA_DIR,
+    USER_DATA_FILE,
+    download_mkt_data,
+    download_user_data,
+)
+from hybrid_advisor_offline.engine.envs.market_envs import DATA_FILE as MKT_DATA_FILE
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+if not os.path.exists(MKT_DATA_FILE):
+    print("[prepare] 未找到市场数据 mkt_data.csv，开始下载或生成...")
+    download_mkt_data()
+else:
+    print(f"[prepare] 已存在市场数据文件：{MKT_DATA_FILE}，跳过下载。")
+
+if not os.path.exists(USER_DATA_FILE):
+    print("[prepare] 未找到 UCI 用户数据 bm_full.csv，开始下载...")
+    download_user_data()
+else:
+    print(f"[prepare] 已存在 UCI 用户数据文件：{USER_DATA_FILE}，跳过下载。")
+PY
+cleanup
+
+step "0b) 训练用户接受度模型"
+python -m hybrid_advisor_offline.offline.trainrl.train_usr_model
+cleanup
+
+NUM_DAYS="$(
+  python - <<'PY'
+import pandas as pd, pathlib, sys
+
+path = pathlib.Path("./data/mkt_data.csv")
+if not path.exists():
+    sys.stdout.write("0")
+    sys.exit(0)
+df = pd.read_csv(path, usecols=[0])
+sys.stdout.write(str(len(df)))
+PY
+)"
+if [[ -z "$NUM_DAYS" || "$NUM_DAYS" -le 0 ]]; then
+  echo "[pipeline_with_sleep] 无法读取 data/mkt_data.csv，默认 NUM_DAYS=5207"
+  NUM_DAYS=5207
+fi
+MAX_START_IDX=$(( NUM_DAYS - MAX_EPISODE_STEPS ))
+if [[ "$MAX_START_IDX" -lt 0 ]]; then
+  MAX_START_IDX=0
+fi
+MAX_START_EXCLUSIVE=$(( MAX_START_IDX + 1 ))
+GAP=$(( EPISODE_STEPS + EMBARGO_DAYS * 2 ))
+if [[ "$MAX_START_IDX" -le "$GAP" ]]; then
+  TRAIN_RANGE_END=1
+else
+  TRAIN_RANGE_END=$(( (MAX_START_IDX - GAP) / 2 ))
+fi
+if [[ "$TRAIN_RANGE_END" -lt 1 ]]; then
+  TRAIN_RANGE_END=1
+fi
+VAL_RANGE_START=$(( TRAIN_RANGE_END + GAP ))
+if [[ "$VAL_RANGE_START" -ge "$MAX_START_EXCLUSIVE" ]]; then
+  VAL_RANGE_START=$(( MAX_START_EXCLUSIVE - 1 ))
+  if [[ "$VAL_RANGE_START" -le "$TRAIN_RANGE_END" ]]; then
+    VAL_RANGE_START=$(( TRAIN_RANGE_END + 1 ))
+  fi
+fi
+TRAIN_START_RANGE="0:${TRAIN_RANGE_END}"
+VAL_START_RANGE="${VAL_RANGE_START}:${MAX_START_EXCLUSIVE}"
+echo "[pipeline_with_sleep] EPISODE_START_RANGE train=${TRAIN_START_RANGE}, val=${VAL_START_RANGE}, GAP=${GAP}"
 
 step "1a) 生成训练集 (start_filter=${TRAIN_START_FILTER}, seed=${TRAIN_START_SEED})"
 EPISODE_START_RANGE="${TRAIN_START_RANGE}" \
